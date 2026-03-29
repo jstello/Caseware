@@ -14,7 +14,7 @@ from .live_gemini import GeminiInvoiceToolAdapter
 from .reasoning import dump_reasoning_envelope
 from .schemas import ALLOWED_CATEGORIES, Category
 from .settings import Settings
-
+from .trace import trace_tool
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
@@ -68,7 +68,7 @@ class InvoiceToolRegistry:
             self.generate_report,
         ]
 
-
+    @trace_tool()
     def load_images(
         self,
         folder_path: str | None = None,
@@ -131,7 +131,7 @@ class InvoiceToolRegistry:
             ),
         }
 
-
+    @trace_tool()
     def extract_invoice_fields(
         self,
         invoice_id: str,
@@ -218,7 +218,7 @@ class InvoiceToolRegistry:
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
         return result
 
-
+    @trace_tool()
     def normalize_invoice(
         self,
         invoice_id: str,
@@ -289,7 +289,7 @@ class InvoiceToolRegistry:
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
         return result
 
-
+    @trace_tool()
     def categorize_invoice(
         self,
         invoice_id: str,
@@ -389,7 +389,7 @@ class InvoiceToolRegistry:
             response["reasoning"] = reasoning_payload
         return response
 
-
+    @trace_tool()
     def aggregate_invoices(self, tool_context: ToolContext) -> dict[str, Any]:
         """Aggregate the processed invoices into run-level totals and category totals."""
 
@@ -414,7 +414,7 @@ class InvoiceToolRegistry:
         tool_context.state["run_summary"] = summary
         return summary
 
-
+    @trace_tool()
     def generate_report(self, tool_context: ToolContext) -> dict[str, Any]:
         """Generate the final structured run output from the aggregated results and the per-invoice records."""
 

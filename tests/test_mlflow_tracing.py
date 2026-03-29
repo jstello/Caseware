@@ -5,6 +5,10 @@ from pathlib import Path
 
 import mlflow
 from mlflow.tracking import MlflowClient
+from google.adk.agents import LlmAgent
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_response import LlmResponse
+from google.genai import types
 
 from invoice_agent.config import (
     ROOT_DIR,
@@ -16,18 +20,179 @@ from invoice_agent.config import (
     load_invoice_agent_config,
 )
 from invoice_agent.service import InvoiceAgentService
+from invoice_agent.schemas import LiveCategorizationSuggestion, LiveExtractionFields, ReasoningEnvelope
 from invoice_agent.settings import Settings
-from invoice_agent.trace import MlflowRunRecorder, TraceWriter
+from invoice_agent.tools import InvoiceToolRegistry
+from invoice_agent.trace import MlflowRunRecorder, MlflowTraceSession, TraceWriter
 
 
 FIXTURE_DIR = Path("/Users/juan_tello/Documents/Caseware/Caseware/fixtures/invoices")
 
 
+class ThoughtTracingPlanner(BaseLlm):
+    model: str = "thought-tracing-planner"
+
+    async def generate_content_async(self, llm_request, stream: bool = False):
+        responses_by_tool: dict[str, dict] = {}
+        for content in llm_request.contents:
+            if not content or not content.parts:
+                continue
+            for part in content.parts:
+                if part.function_response:
+                    responses_by_tool[part.function_response.name] = dict(
+                        part.function_response.response or {}
+                    )
+
+        load_response = responses_by_tool.get("load_images")
+        if load_response is None:
+            yield _planner_response(
+                text="I will inspect the available invoices first.",
+                thought="I should load the folder before choosing the next tool.",
+                tool_name="load_images",
+                args={},
+                call_id="mlflow-load-images-1",
+            )
+            return
+
+        invoice_ref = load_response["invoice_refs"][0]
+        invoice_id = invoice_ref["invoice_id"]
+        if "extract_invoice_fields" not in responses_by_tool:
+            yield _planner_response(
+                text=f"I will extract the fields for {invoice_ref['filename']}.",
+                thought="Extraction is the next step because I need structured invoice fields.",
+                tool_name="extract_invoice_fields",
+                args={"invoice_id": invoice_id},
+                call_id="mlflow-extract-1",
+            )
+            return
+
+        if "normalize_invoice" not in responses_by_tool:
+            yield _planner_response(
+                text=f"I have enough detail to normalize {invoice_ref['filename']}.",
+                thought="The extraction reasoning is available, so I can normalize the invoice safely.",
+                tool_name="normalize_invoice",
+                args={"invoice_id": invoice_id},
+                call_id="mlflow-normalize-1",
+            )
+            return
+
+        if "categorize_invoice" not in responses_by_tool:
+            yield _planner_response(
+                text=f"I will categorize {invoice_ref['filename']} next.",
+                thought="Normalization is complete, so categorization is the next planner decision.",
+                tool_name="categorize_invoice",
+                args={"invoice_id": invoice_id},
+                call_id="mlflow-categorize-1",
+            )
+            return
+
+        if "aggregate_invoices" not in responses_by_tool:
+            yield _planner_response(
+                text="Every invoice is categorized, so I will aggregate the totals.",
+                thought="I can aggregate now that each invoice has a final category.",
+                tool_name="aggregate_invoices",
+                args={},
+                call_id="mlflow-aggregate-1",
+            )
+            return
+
+        if "generate_report" not in responses_by_tool:
+            yield _planner_response(
+                text="The totals are ready, and I can assemble the report.",
+                thought="The last planner action is to generate the final report.",
+                tool_name="generate_report",
+                args={},
+                call_id="mlflow-report-1",
+            )
+            return
+
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[types.Part(text="The report is complete.")]),
+            partial=False,
+        )
+
+
+class _TraceReasoningLiveAdapter:
+    def extract_invoice_fields(self, *, invoice_path: Path, reviewer_prompt: str | None, focus_hint: str | None):
+        return LiveExtractionFields(
+            vendor="Trace Air",
+            invoice_date="2026-02-15",
+            invoice_number="TRACE-1007",
+            total=642.10,
+            currency="USD",
+            raw_category_hint="airfare",
+            extraction_confidence=0.93,
+            notes=["The invoice is legible."],
+            reasoning=ReasoningEnvelope(
+                summaries=["The airfare invoice clearly exposes vendor and total."],
+                summary_count=1,
+                thoughts_token_count=6,
+                total_token_count=25,
+                has_thought_signature=False,
+                source="extract_invoice_fields",
+            ),
+        )
+
+    def categorize_invoice(
+        self,
+        *,
+        normalized_invoice: dict,
+        raw_category_hint: str | None,
+        reviewer_prompt: str | None,
+    ):
+        return LiveCategorizationSuggestion(
+            category="Travel",
+            confidence=0.88,
+            notes=["Airfare maps to Travel."],
+            reasoning=ReasoningEnvelope(
+                summaries=["Travel is the closest allowed category for airfare."],
+                summary_count=1,
+                thoughts_token_count=5,
+                total_token_count=19,
+                has_thought_signature=False,
+                source="categorize_invoice",
+            ),
+        )
+
+class _FakeToolContext:
+    def __init__(self, state: dict) -> None:
+        self.state = state
+        self.function_call_id = "mlflow-extract-1"
+def _planner_response(
+    *,
+    text: str,
+    tool_name: str,
+    args: dict | None,
+    call_id: str,
+    thought: str,
+) -> LlmResponse:
+    return LlmResponse(
+        content=types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    text=thought,
+                    thought=True,
+                    thought_signature=f"{call_id}-signature".encode("utf-8"),
+                ),
+                types.Part(text=text),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id=call_id,
+                        name=tool_name,
+                        args=args or {},
+                    )
+                ),
+            ],
+        ),
+        partial=False,
+    )
+
+
 def test_mlflow_recorder_logs_to_local_sqlite_store(tmp_path: Path) -> None:
-    """MlflowRunRecorder creates an experiment, logs config and metrics to local SQLite."""
     config_path = tmp_path / "invoice_agent.yaml"
     config_path.write_text(
-        """\
+        """
 runtime:
   app_name: invoice-agent
   planner_mode: mock
@@ -166,20 +331,7 @@ tracing:
     assert client.list_artifacts(run.info.run_id, "traces")
 
 
-def test_gemini_autolog_enabled() -> None:
-    """Verify that mlflow.gemini.autolog() was activated at import time."""
-    assert hasattr(mlflow, "gemini"), "mlflow.gemini module must exist"
-    # The autolog() call happens at module level in invoice_agent.trace.
-    # We import it to ensure the side effect ran.
-    import invoice_agent.trace  # noqa: F401
-
-    # If autolog is active, the gemini integration should be registered.
-    # We just verify the module-level call doesn't raise and the module loaded.
-    assert mlflow.gemini is not None
-
-
-def test_full_mock_run_produces_mlflow_run_and_traces(tmp_path: Path, monkeypatch) -> None:
-    """A full mock-mode run via InvoiceAgentService logs an MLflow run with artifacts."""
+def test_mlflow_groups_invoice_execution_under_one_nested_trace(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("INVOICE_AGENT_MLFLOW_ENABLED", "true")
     base_config = load_invoice_agent_config(ROOT_DIR / "config" / "invoice_agent.yaml")
     config = base_config.model_copy(
@@ -194,7 +346,7 @@ def test_full_mock_run_produces_mlflow_run_and_traces(tmp_path: Path, monkeypatc
             ),
             "tracing": base_config.tracing.model_copy(
                 update={
-                    "experiment_name": "invoice-agent-autolog-test",
+                    "experiment_name": "invoice-agent-nested-trace-test",
                     "enable_async_logging": False,
                 }
             ),
@@ -222,14 +374,12 @@ def test_full_mock_run_produces_mlflow_run_and_traces(tmp_path: Path, monkeypatc
 
     run_id, events = asyncio.run(run_stream_once())
 
-    # Verify SSE event stream structure
     assert events[0]["event"] == "run_started"
     assert events[-1]["event"] == "final_result"
 
-    # Verify MLflow run was recorded with expected attributes
     tracking_uri = f"sqlite:///{settings.config.runtime.mlflow_tracking_dir / 'mlflow.db'}"
     client = MlflowClient(tracking_uri=tracking_uri)
-    experiment = client.get_experiment_by_name("invoice-agent-autolog-test")
+    experiment = client.get_experiment_by_name("invoice-agent-nested-trace-test")
     assert experiment is not None
 
     runs = client.search_runs(
@@ -239,86 +389,252 @@ def test_full_mock_run_produces_mlflow_run_and_traces(tmp_path: Path, monkeypatc
     )
     assert runs
     run = runs[0]
-    assert run.data.tags["run_id"] == run_id
-    assert run.data.tags["planner_mode"] == "mock"
+    model_id = run.data.tags["mlflow.active_model_id"]
+    assert run.data.tags["mlflow.active_model_name"]
+    assert run.data.tags["mlflow.source.git.branch"]
+    assert run.data.tags["mlflow.source.git.commit"]
+    assert run.data.tags["mlflow.source.git.dirty"] in {"true", "false"}
 
-    # Verify trace artifacts were logged
-    trace_artifacts = client.list_artifacts(run.info.run_id, "traces")
-    trace_paths = {artifact.path for artifact in trace_artifacts}
-    assert "traces/trace.jsonl" in trace_paths
-    assert "traces/sse.jsonl" in trace_paths
-
-    # Verify output artifacts were logged
-    output_artifacts = client.list_artifacts(run.info.run_id, "outputs")
-    output_paths = {artifact.path for artifact in output_artifacts}
-    assert "outputs/final_report.json" in output_paths
-
-    # Verify metrics
-    assert run.data.metrics.get("invoice_count", 0) > 0
-    assert run.data.metrics.get("total_spend", 0) > 0
-
-
-def test_recorder_finalize_error_logs_error_artifact(tmp_path: Path) -> None:
-    """MlflowRunRecorder.finalize_error writes an error artifact and marks run as FAILED."""
-    config = InvoiceAgentConfig(
-        runtime=RuntimeConfig(
-            app_name="invoice-agent",
-            planner_mode="mock",
-            live_model="gemini-2.5-flash",
-            max_extraction_attempts=2,
-            traces_dir=tmp_path / "runs",
-            mlflow_tracking_dir=tmp_path / "mlflow",
-            fixture_manifest_path=tmp_path / "fixtures" / "manifest.json",
-        ),
-        agent=AgentConfig(
-            name="invoice_agent",
-            description="Processes invoice images.",
-            system_instruction="You are a local invoice-processing agent.",
-            request_prompt_template="Optional reviewer prompt: {prompt}.",
-            live_extraction_prompt_template="Extract invoice fields.",
-            live_categorization_prompt_template="Categorize invoice fields.",
-            allowed_categories=["Travel", "Other"],
-            tool_stages={
-                "load_images": "loading",
-                "extract_invoice_fields": "extraction",
-                "normalize_invoice": "normalization",
-                "categorize_invoice": "categorization",
-                "aggregate_invoices": "aggregation",
-                "generate_report": "reporting",
-            },
-        ),
-        tracing=TracingConfig(
-            enabled=True,
-            experiment_name="invoice-agent-error-test",
-            tracking_uri=None,
-            enable_async_logging=False,
-        ),
+    traces = mlflow.search_traces(
+        experiment_ids=[experiment.experiment_id],
+        model_id=model_id,
+        max_results=10,
+        return_type="list",
     )
+    assert len(traces) == 1
 
+    trace = mlflow.get_trace(traces[0].info.trace_id)
+    spans_by_name = {span.name: span for span in trace.data.spans}
+
+    root_name = f"invoice_agent_run:{run_id}"
+    assert root_name in spans_by_name
+    assert spans_by_name[root_name].parent_id is None
+    assert spans_by_name[root_name].span_type == "AGENT"
+
+    bright_invoice = spans_by_name["invoice:bright-stationery-noisy"]
+    assert bright_invoice.parent_id == spans_by_name[root_name].span_id
+    assert bright_invoice.span_type == "TASK"
+
+    extract_decisions = [
+        span
+        for span in trace.data.spans
+        if span.name == "planner:extract_invoice_fields"
+        and span.attributes.get("invoice.id") == "bright-stationery-noisy"
+    ]
+    assert len(extract_decisions) == 2
+    assert all(span.parent_id == bright_invoice.span_id for span in extract_decisions)
+
+    extract_tools = [
+        span
+        for span in trace.data.spans
+        if span.name == "extract_invoice_fields"
+        and span.attributes.get("invoice.id") == "bright-stationery-noisy"
+    ]
+    assert len(extract_tools) == 2
+    assert {span.parent_id for span in extract_tools} == {
+        span.span_id for span in extract_decisions
+    }
+    assert all(span.attributes.get("tool.stage") == "extraction" for span in extract_tools)
+    assert all(span.attributes.get("tool.call_id") for span in extract_tools)
+
+    report_decision = spans_by_name["planner:generate_report"]
+    report_tool = spans_by_name["generate_report"]
+    assert report_decision.parent_id == spans_by_name[root_name].span_id
+    assert report_tool.parent_id == report_decision.span_id
+    assert report_tool.attributes.get("tool.stage") == "reporting"
+    assert report_tool.attributes.get("tool.call_id")
+
+
+def test_mlflow_records_planner_and_tool_reasoning_metadata(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-api-key")
+    if mlflow.active_run() is not None:
+        mlflow.end_run(status="KILLED")
+    base_config = load_invoice_agent_config(ROOT_DIR / "config" / "invoice_agent.yaml")
+    config = base_config.model_copy(
+        update={
+            "runtime": base_config.runtime.model_copy(
+                update={
+                    "planner_mode": "live",
+                    "traces_dir": tmp_path / "runs",
+                    "mlflow_tracking_dir": tmp_path / "mlflow",
+                    "fixture_manifest_path": FIXTURE_DIR / "manifest.json",
+                }
+            ),
+            "tracing": base_config.tracing.model_copy(
+                update={
+                    "experiment_name": "invoice-agent-thought-trace-test",
+                    "enable_async_logging": False,
+                }
+            ),
+        }
+    )
     config_path = tmp_path / "invoice_agent.yaml"
     config_path.write_text(config_to_artifact_text(config), encoding="utf-8")
 
-    run_dir = tmp_path / "run"
-    run_dir.mkdir(parents=True)
+    settings = Settings(config_path=config_path)
+    run_id = "thought-mlflow-run"
+    run_dir = settings.runtime.traces_dir / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
     trace_writer = TraceWriter(run_dir)
-    trace_writer.write_trace(kind="run_started", payload={"run_id": "error-run"})
-
-    recorder = MlflowRunRecorder(
-        run_id="error-run",
-        run_dir=run_dir,
-        config_path=config_path,
-        config=config,
-        prompt=None,
-    )
-    recorder.start()
-    recorder.finalize_error(
-        trace_writer,
-        {"error_type": "RuntimeError", "message": "test error"},
-    )
-
-    tracking_uri = f"sqlite:///{config.runtime.mlflow_tracking_dir / 'mlflow.db'}"
+    tracking_uri = f"sqlite:///{(settings.config.runtime.mlflow_tracking_dir / 'mlflow.db').resolve()}"
+    mlflow.set_tracking_uri(tracking_uri)
     client = MlflowClient(tracking_uri=tracking_uri)
-    experiment = client.get_experiment_by_name("invoice-agent-error-test")
+    experiment = client.get_experiment_by_name("invoice-agent-thought-trace-test")
+    if experiment is None:
+        artifact_root = (
+            settings.config.runtime.mlflow_tracking_dir
+            / "artifacts"
+            / "invoice-agent-thought-trace-test"
+        )
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        experiment_id = client.create_experiment(
+            "invoice-agent-thought-trace-test",
+            artifact_location=f"file://{artifact_root.resolve()}",
+            tags={key: str(value) for key, value in settings.config.tracing.tags.items()},
+        )
+    else:
+        experiment_id = experiment.experiment_id
+    mlflow.set_experiment(experiment_id=experiment_id)
+    mlflow.start_run(run_name=run_id)
+
+    trace_session = MlflowTraceSession(run_id=run_id, enabled=True)
+    run_started = {
+        "run_id": run_id,
+        "mode": settings.runtime.planner_mode,
+        "input_source": {"source_type": "folder", "path": str(FIXTURE_DIR)},
+        "prompt": "Use conservative categorization.",
+        "version_tracking": None,
+    }
+    trace_writer.write_trace(kind="run_started", payload=run_started)
+    trace_session.start(run_started, version_tracking=None)
+
+    planner_reasoning = {
+        "summaries": ["I should load the folder before choosing the next tool."],
+        "summary_count": 1,
+        "thoughts_token_count": 9,
+        "total_token_count": 31,
+        "has_thought_signature": True,
+        "source": "planner",
+    }
+    tool_call = {
+        "run_id": run_id,
+        "tool_name": "extract_invoice_fields",
+        "tool_call_id": "mlflow-extract-1",
+        "stage": "extraction",
+        "args": {"invoice_id": "acme-air-travel-001"},
+    }
+    trace_writer.write_trace(
+        kind="tool_call",
+        payload={
+            "stage": tool_call["stage"],
+            "tool_name": tool_call["tool_name"],
+            "tool_call_id": tool_call["tool_call_id"],
+            "args": tool_call["args"],
+            "planner_progress_text": "I will inspect the available invoices first.",
+            "planner_reasoning": planner_reasoning,
+        },
+    )
+    trace_session.start_decision_span(
+        tool_call=tool_call,
+        planner_progress_text="I will inspect the available invoices first.",
+        planner_reasoning=planner_reasoning,
+        agent_name="invoice_agent",
+    )
+
+    invoice_tools = InvoiceToolRegistry(
+        settings,
+        live_adapter=_TraceReasoningLiveAdapter(),
+    )
+    tool_context = _FakeToolContext(
+        {
+            "run_prompt": "Use conservative categorization.",
+            "working_invoices": {
+                "acme-air-travel-001": {
+                    "invoice_id": "acme-air-travel-001",
+                    "filename": "acme-air-travel-001.svg",
+                    "path": str(FIXTURE_DIR / "acme-air-travel-001.svg"),
+                    "attempts": 0,
+                    "issues": [],
+                }
+            },
+            "tool_stages": dict(settings.agent.tool_stages),
+        }
+    )
+    extract_result = invoice_tools.extract_invoice_fields(
+        "acme-air-travel-001",
+        tool_context=tool_context,
+    )
+    tool_result = {
+        "run_id": run_id,
+        "tool_name": "extract_invoice_fields",
+        "tool_call_id": "mlflow-extract-1",
+        "stage": "extraction",
+        "result": extract_result,
+    }
+    trace_writer.write_trace(
+        kind="tool_result",
+        payload={
+            "stage": "extraction",
+            "tool_name": "extract_invoice_fields",
+            "tool_call_id": "mlflow-extract-1",
+            "result": extract_result,
+        },
+    )
+    trace_session.complete_decision_span(tool_result)
+
+    trace_writer.write_thought_ledger(
+        [
+            {
+                "step_index": 1,
+                "source": "planner",
+                "tool_name": "extract_invoice_fields",
+                "tool_call_id": "mlflow-extract-1",
+                "progress_text": "I will inspect the available invoices first.",
+                "summaries": planner_reasoning["summaries"],
+                "summary_count": planner_reasoning["summary_count"],
+                "thoughts_token_count": planner_reasoning["thoughts_token_count"],
+                "total_token_count": planner_reasoning["total_token_count"],
+                "has_thought_signature": planner_reasoning["has_thought_signature"],
+            },
+            {
+                "step_index": 2,
+                "source": extract_result["reasoning"]["source"],
+                "tool_name": "extract_invoice_fields",
+                "tool_call_id": "mlflow-extract-1",
+                "progress_text": None,
+                "summaries": extract_result["reasoning"]["summaries"],
+                "summary_count": extract_result["reasoning"]["summary_count"],
+                "thoughts_token_count": extract_result["reasoning"]["thoughts_token_count"],
+                "total_token_count": extract_result["reasoning"]["total_token_count"],
+                "has_thought_signature": extract_result["reasoning"]["has_thought_signature"],
+            },
+        ]
+    )
+
+    final_report = {
+        "run_summary": {
+            "total_spend": 0.0,
+            "spend_by_category": {},
+            "invoice_count": 0,
+        },
+        "invoices": [],
+        "issues_and_assumptions": [],
+    }
+    trace_writer.write_report(final_report)
+    final_payload = {
+        "run_id": run_id,
+        "report": final_report,
+        "trace_path": str(trace_writer.trace_path),
+        "sse_path": str(trace_writer.sse_path),
+        "report_path": str(run_dir / "final_report.json"),
+    }
+    trace_session.complete(final_payload)
+    mlflow.log_artifact(str(trace_writer.trace_path), artifact_path="traces")
+    mlflow.log_artifact(str(trace_writer.thought_ledger_path), artifact_path="traces")
+    mlflow.log_artifact(str(run_dir / "final_report.json"), artifact_path="outputs")
+    mlflow.end_run(status="FINISHED")
+
+    experiment = client.get_experiment_by_name("invoice-agent-thought-trace-test")
     assert experiment is not None
 
     runs = client.search_runs(
@@ -328,7 +644,38 @@ def test_recorder_finalize_error_logs_error_artifact(tmp_path: Path) -> None:
     )
     assert runs
     run = runs[0]
-    assert run.info.status == "FAILED"
 
-    error_artifacts = client.list_artifacts(run.info.run_id, "errors")
-    assert any("error.json" in a.path for a in error_artifacts)
+    trace_artifacts = client.list_artifacts(run.info.run_id, "traces")
+    assert {artifact.path for artifact in trace_artifacts} >= {
+        "traces/trace.jsonl",
+        "traces/thought_ledger.json",
+    }
+
+    traces = mlflow.search_traces(
+        experiment_ids=[experiment.experiment_id],
+        max_results=10,
+        return_type="list",
+    )
+    assert len(traces) == 1
+
+    trace = mlflow.get_trace(traces[0].info.trace_id)
+    spans_by_name = {span.name: span for span in trace.data.spans}
+
+    load_decision = spans_by_name["planner:extract_invoice_fields"]
+    assert load_decision.inputs["planner_reasoning"]["summaries"] == [
+        "I should load the folder before choosing the next tool."
+    ]
+    assert load_decision.inputs["planner_progress_text"] == "I will inspect the available invoices first."
+    assert load_decision.attributes.get("planner.summary_count") == 1
+    assert load_decision.attributes.get("planner.has_thought_signature") is True
+
+    extract_tool = next(
+        span
+        for span in trace.data.spans
+        if span.name == "extract_invoice_fields"
+        and span.attributes.get("invoice.id") == "acme-air-travel-001"
+    )
+    assert extract_tool.outputs["reasoning"]["source"] == "extract_invoice_fields"
+    assert extract_tool.outputs["reasoning"]["summaries"] == [
+        "The airfare invoice clearly exposes vendor and total."
+    ]

@@ -16,7 +16,7 @@ from .reasoning import build_reasoning_envelope, dump_reasoning_envelope
 from .schemas import PreparedInputSource, ThoughtLedgerEntry
 from .settings import Settings, get_settings
 from .tools import InvoiceToolRegistry
-from .trace import MlflowRunRecorder, TraceWriter
+from .trace import MlflowRunRecorder, MlflowTraceSession, TraceWriter
 
 
 class InvoiceAgentService:
@@ -77,6 +77,11 @@ class InvoiceAgentService:
             prompt=effective_request_prompt,
         )
         mlflow_recorder.start()
+        version_tracking = mlflow_recorder.version_tracking_payload()
+        mlflow_trace_session = MlflowTraceSession(
+            run_id=run_id,
+            enabled=mlflow_recorder.enabled,
+        )
         invoice_tools = InvoiceToolRegistry(self.settings)
         agent = build_invoice_agent(self.settings, invoice_tools)
         session_service = InMemorySessionService()
@@ -104,14 +109,17 @@ class InvoiceAgentService:
             "mode": self.settings.runtime.planner_mode,
             "input_source": prepared_input.model_dump(),
             "prompt": prompt,
+            "version_tracking": version_tracking,
         }
         trace_writer.write_trace(kind="run_started", payload=run_started)
+        mlflow_trace_session.start(run_started, version_tracking=version_tracking)
         yield self._record_sse(trace_writer, "run_started", run_started)
 
         live_configuration_error = self._live_configuration_error(run_id)
         if live_configuration_error is not None:
             trace_writer.write_trace(kind="error", payload=live_configuration_error)
             yield self._record_sse(trace_writer, "error", live_configuration_error)
+            mlflow_trace_session.fail(live_configuration_error)
             mlflow_recorder.finalize_error(trace_writer, live_configuration_error)
             return
 
@@ -176,7 +184,12 @@ class InvoiceAgentService:
                                     "planner_reasoning": planner_reasoning,
                                 },
                             )
-
+                            mlflow_trace_session.start_decision_span(
+                                tool_call=tool_call,
+                                planner_progress_text=progress_text,
+                                planner_reasoning=planner_reasoning,
+                                agent_name=event.author,
+                            )
                             if planner_reasoning is not None:
                                 thought_ledger_entries.append(
                                     ThoughtLedgerEntry(
@@ -240,6 +253,7 @@ class InvoiceAgentService:
                                     ).model_dump(mode="json")
                                 )
                             yield self._record_sse(trace_writer, "tool_result", public_tool_result)
+                            mlflow_trace_session.complete_decision_span(tool_result)
 
                             if tool_name == "categorize_invoice" and response_payload.get("invoice_result"):
                                 invoice_event = {
@@ -251,6 +265,7 @@ class InvoiceAgentService:
                                     kind="invoice_result",
                                     payload=invoice_event,
                                 )
+                                mlflow_trace_session.complete_invoice_span(invoice_event)
                                 yield self._record_sse(trace_writer, "invoice_result", invoice_event)
                             if tool_name == "generate_report":
                                 final_report = response_payload
@@ -295,6 +310,7 @@ class InvoiceAgentService:
                 trace_writer.write_thought_ledger(thought_ledger_entries)
             trace_writer.write_trace(kind="error", payload=error_payload)
             yield self._record_sse(trace_writer, "error", error_payload)
+            mlflow_trace_session.fail(error_payload)
             mlflow_recorder.finalize_error(trace_writer, error_payload)
             return
 
@@ -308,6 +324,7 @@ class InvoiceAgentService:
                 trace_writer.write_thought_ledger(thought_ledger_entries)
             trace_writer.write_trace(kind="error", payload=error_payload)
             yield self._record_sse(trace_writer, "error", error_payload)
+            mlflow_trace_session.fail(error_payload)
             mlflow_recorder.finalize_error(trace_writer, error_payload)
             return
 
@@ -320,14 +337,17 @@ class InvoiceAgentService:
             "trace_path": str(trace_writer.trace_path),
             "sse_path": str(trace_writer.sse_path),
             "report_path": str(run_dir / "final_report.json"),
+            "version_tracking": version_tracking,
         }
         trace_writer.write_trace(
             kind="final_result",
             payload={
                 "report": final_report,
+                "version_tracking": version_tracking,
             },
         )
         yield self._record_sse(trace_writer, "final_result", final_payload)
+        mlflow_trace_session.complete(final_payload)
         mlflow_recorder.finalize(trace_writer, final_report)
 
     def _record_sse(
