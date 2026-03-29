@@ -6,11 +6,17 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 from google.adk.agents import LlmAgent
+from google.genai import types
 
 from invoice_agent.app import app
 from invoice_agent.live_gemini import GeminiInvoiceToolAdapter
 from invoice_agent.mock_planner import MockPlannerLlm
-from invoice_agent.schemas import FinalReport, LiveCategorizationSuggestion, LiveExtractionFields
+from invoice_agent.schemas import (
+    FinalReport,
+    LiveCategorizationSuggestion,
+    LiveExtractionFields,
+    ReasoningEnvelope,
+)
 from invoice_agent.settings import get_settings
 
 
@@ -18,12 +24,20 @@ FIXTURE_DIR = Path("/Users/juan_tello/Documents/Caseware/Caseware/fixtures/invoi
 
 
 class _FakeResponse:
-    def __init__(self, text: str) -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        parts: list[types.Part] | None = None,
+        usage_metadata: types.GenerateContentResponseUsageMetadata | None = None,
+    ) -> None:
         self.text = text
+        self.parts = parts or [types.Part(text=text)]
+        self.usage_metadata = usage_metadata
 
 
 class _RecordingModels:
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(self, responses: list[_FakeResponse]) -> None:
         self.responses = list(responses)
         self.calls: list[dict] = []
 
@@ -35,11 +49,11 @@ class _RecordingModels:
                 "config": config,
             }
         )
-        return _FakeResponse(self.responses.pop(0))
+        return self.responses.pop(0)
 
 
 class _RecordingClient:
-    def __init__(self, responses: list[str]) -> None:
+    def __init__(self, responses: list[_FakeResponse]) -> None:
         self.models = _RecordingModels(responses)
 
 
@@ -134,17 +148,19 @@ def test_live_extraction_adapter_uses_multimodal_input_and_structured_schema() -
     fixture_path = FIXTURE_DIR / "acme-air-travel-001.svg"
     client = _RecordingClient(
         [
-            json.dumps(
-                {
-                    "vendor": "Acme Air",
-                    "invoice_date": "2026-02-15",
-                    "invoice_number": "AA-1007",
-                    "total": 642.1,
-                    "currency": "USD",
-                    "raw_category_hint": "airfare",
-                    "extraction_confidence": 0.97,
-                    "notes": ["The airline invoice is legible."],
-                }
+            _FakeResponse(
+                json.dumps(
+                    {
+                        "vendor": "Acme Air",
+                        "invoice_date": "2026-02-15",
+                        "invoice_number": "AA-1007",
+                        "total": 642.1,
+                        "currency": "USD",
+                        "raw_category_hint": "airfare",
+                        "extraction_confidence": 0.97,
+                        "notes": ["The airline invoice is legible."],
+                    }
+                )
             )
         ]
     )
@@ -168,18 +184,21 @@ def test_live_extraction_adapter_uses_multimodal_input_and_structured_schema() -
     assert call["contents"][0].inline_data.mime_type == "image/svg+xml"
     assert "Focus hint: vendor, total." in call["contents"][1]
     assert call["config"]["response_mime_type"] == "application/json"
+    assert call["config"]["thinking_config"].include_thoughts is True
     assert "extraction_confidence" in call["config"]["response_json_schema"]["properties"]
 
 
 def test_live_categorization_adapter_uses_allowed_categories_and_structured_schema() -> None:
     client = _RecordingClient(
         [
-            json.dumps(
-                {
-                    "category": "Travel",
-                    "confidence": 0.82,
-                    "notes": ["Airfare and hotel phrasing support Travel."],
-                }
+            _FakeResponse(
+                json.dumps(
+                    {
+                        "category": "Travel",
+                        "confidence": 0.82,
+                        "notes": ["Airfare and hotel phrasing support Travel."],
+                    }
+                )
             )
         ]
     )
@@ -205,7 +224,133 @@ def test_live_categorization_adapter_uses_allowed_categories_and_structured_sche
     assert "Allowed categories: Travel, Other." in call["contents"]
     assert '"vendor": "Acme Air"' in call["contents"]
     assert call["config"]["response_mime_type"] == "application/json"
+    assert call["config"]["thinking_config"].include_thoughts is True
     assert "category" in call["config"]["response_json_schema"]["properties"]
+
+
+def test_live_extraction_adapter_captures_thought_summaries_and_token_counts() -> None:
+    client = _RecordingClient(
+        [
+            _FakeResponse(
+                json.dumps(
+                    {
+                        "vendor": "Acme Air",
+                        "invoice_date": "2026-02-15",
+                        "invoice_number": "AA-1007",
+                        "total": 642.1,
+                        "currency": "USD",
+                        "raw_category_hint": "airfare",
+                        "extraction_confidence": 0.97,
+                        "notes": ["The airline invoice is legible."],
+                    }
+                ),
+                parts=[
+                    types.Part(
+                        text="I should confirm the vendor and total before returning structured fields.",
+                        thought=True,
+                        thought_signature=b"extract-signature",
+                    ),
+                    types.Part(
+                        text=json.dumps(
+                            {
+                                "vendor": "Acme Air",
+                                "invoice_date": "2026-02-15",
+                                "invoice_number": "AA-1007",
+                                "total": 642.1,
+                                "currency": "USD",
+                                "raw_category_hint": "airfare",
+                                "extraction_confidence": 0.97,
+                                "notes": ["The airline invoice is legible."],
+                            }
+                        )
+                    ),
+                ],
+                usage_metadata=types.GenerateContentResponseUsageMetadata(
+                    thoughts_token_count=12,
+                    total_token_count=74,
+                ),
+            )
+        ]
+    )
+    adapter = GeminiInvoiceToolAdapter(
+        client=client,
+        model="gemini-2.5-flash",
+        extraction_prompt_template="File name: {filename}. Focus hint: {focus_hint}.",
+        categorization_prompt_template="unused",
+        allowed_categories=["Travel", "Other"],
+    )
+
+    result = adapter.extract_invoice_fields(
+        invoice_path=FIXTURE_DIR / "acme-air-travel-001.svg",
+        reviewer_prompt=None,
+        focus_hint="vendor, total",
+    )
+
+    assert result.reasoning == ReasoningEnvelope(
+        summaries=["I should confirm the vendor and total before returning structured fields."],
+        summary_count=1,
+        thoughts_token_count=12,
+        total_token_count=74,
+        has_thought_signature=True,
+        source="extract_invoice_fields",
+    )
+
+
+def test_live_categorization_adapter_captures_thought_summaries_and_token_counts() -> None:
+    client = _RecordingClient(
+        [
+            _FakeResponse(
+                json.dumps(
+                    {
+                        "category": "Travel",
+                        "confidence": 0.82,
+                        "notes": ["Airfare and hotel phrasing support Travel."],
+                    }
+                ),
+                parts=[
+                    types.Part(
+                        text="The raw airfare hint aligns with the allowed Travel category.",
+                        thought=True,
+                    ),
+                    types.Part(
+                        text=json.dumps(
+                            {
+                                "category": "Travel",
+                                "confidence": 0.82,
+                                "notes": ["Airfare and hotel phrasing support Travel."],
+                            }
+                        )
+                    ),
+                ],
+                usage_metadata=types.GenerateContentResponseUsageMetadata(
+                    thoughts_token_count=8,
+                    total_token_count=39,
+                ),
+            )
+        ]
+    )
+    adapter = GeminiInvoiceToolAdapter(
+        client=client,
+        model="gemini-2.5-flash",
+        extraction_prompt_template="unused",
+        categorization_prompt_template="Invoice: {normalized_invoice}.",
+        allowed_categories=["Travel", "Other"],
+    )
+
+    result = adapter.categorize_invoice(
+        normalized_invoice={"vendor": "Acme Air", "total": 642.1, "currency": "USD"},
+        raw_category_hint="airfare",
+        reviewer_prompt=None,
+    )
+
+    assert result.reasoning == ReasoningEnvelope(
+        summaries=["The raw airfare hint aligns with the allowed Travel category."],
+        summary_count=1,
+        thoughts_token_count=8,
+        total_token_count=39,
+        has_thought_signature=False,
+        source="categorize_invoice",
+    )
 
 
 def test_live_mode_run_uses_live_extraction_and_categorization_paths(
@@ -223,6 +368,14 @@ def test_live_mode_run_uses_live_extraction_and_categorization_paths(
                 raw_category_hint="airfare",
                 extraction_confidence=0.91,
                 notes=["Live extraction recovered all core fields."],
+                reasoning=ReasoningEnvelope(
+                    summaries=["The invoice clearly shows airfare details."],
+                    summary_count=1,
+                    thoughts_token_count=4,
+                    total_token_count=18,
+                    has_thought_signature=False,
+                    source="extract_invoice_fields",
+                ),
             )
         ],
         categorization_responses=[
@@ -230,6 +383,14 @@ def test_live_mode_run_uses_live_extraction_and_categorization_paths(
                 category="Travel",
                 confidence=0.86,
                 notes=["Airfare maps to Travel."],
+                reasoning=ReasoningEnvelope(
+                    summaries=["Travel is the closest allowed category."],
+                    summary_count=1,
+                    thoughts_token_count=5,
+                    total_token_count=17,
+                    has_thought_signature=False,
+                    source="categorize_invoice",
+                ),
             )
         ],
     )
@@ -254,6 +415,12 @@ def test_live_mode_run_uses_live_extraction_and_categorization_paths(
 
     events = _parse_sse_payload(response.text)
     assert events[-1]["event"] == "final_result"
+    tool_results = [
+        entry["data"]["result"]
+        for entry in events
+        if entry["event"] == "tool_result"
+    ]
+    assert all("reasoning" not in result for result in tool_results)
     report = FinalReport.model_validate(events[-1]["data"]["report"])
     assert report.run_summary.total_spend == 777.77
     assert report.invoices[0].vendor == "Live Air"

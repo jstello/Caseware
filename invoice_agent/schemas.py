@@ -29,6 +29,35 @@ ALLOWED_CATEGORIES: tuple[Category, ...] = (
 )
 
 
+ReasoningSource = Literal[
+    "planner",
+    "extract_invoice_fields",
+    "categorize_invoice",
+]
+
+
+class ReasoningEnvelope(BaseModel):
+    summaries: list[str] = Field(default_factory=list)
+    summary_count: int = 0
+    thoughts_token_count: int | None = None
+    total_token_count: int | None = None
+    has_thought_signature: bool = False
+    source: ReasoningSource
+
+
+class ThoughtLedgerEntry(BaseModel):
+    step_index: int
+    source: ReasoningSource
+    tool_name: str | None = None
+    tool_call_id: str | None = None
+    progress_text: str | None = None
+    summaries: list[str] = Field(default_factory=list)
+    summary_count: int = 0
+    thoughts_token_count: int | None = None
+    total_token_count: int | None = None
+    has_thought_signature: bool = False
+
+
 class JsonRunRequest(BaseModel):
     folder_path: str
     prompt: str | None = None
@@ -80,7 +109,7 @@ class CategorizationDecision(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
-class LiveExtractionFields(BaseModel):
+class LiveExtractionPayload(BaseModel):
     vendor: str | None = Field(default=None, description="Vendor or issuer name.")
     invoice_date: str | None = Field(
         default=None,
@@ -112,7 +141,11 @@ class LiveExtractionFields(BaseModel):
     )
 
 
-class LiveCategorizationSuggestion(BaseModel):
+class LiveExtractionFields(LiveExtractionPayload):
+    reasoning: ReasoningEnvelope | None = None
+
+
+class LiveCategorizationPayload(BaseModel):
     category: str | None = Field(
         default=None,
         description="One assignment category if possible. Use Other when unsure.",
@@ -125,6 +158,10 @@ class LiveCategorizationSuggestion(BaseModel):
         default_factory=list,
         description="Short explanation for the category, especially when using Other.",
     )
+
+
+class LiveCategorizationSuggestion(LiveCategorizationPayload):
+    reasoning: ReasoningEnvelope | None = None
 
 
 class InvoiceResult(BaseModel):

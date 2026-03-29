@@ -46,7 +46,10 @@ def build_invoice_agent(
             model=settings.runtime.live_model,
             retry_options=types.HttpRetryOptions(attempts=3, initialDelay=1.0),
         )
-        generate_content_config = types.GenerateContentConfig(temperature=0.0)
+        generate_content_config = types.GenerateContentConfig(
+            temperature=0.0,
+            thinking_config=types.ThinkingConfig(include_thoughts=True),
+        )
     else:
         model = MockPlannerLlm()
         generate_content_config = None

@@ -64,3 +64,5 @@ def test_live_invoice_agent_uses_gemini_with_low_temperature() -> None:
     assert agent.model.model == settings.runtime.live_model
     assert agent.generate_content_config is not None
     assert agent.generate_content_config.temperature == 0.0
+    assert agent.generate_content_config.thinking_config is not None
+    assert agent.generate_content_config.thinking_config.include_thoughts is True

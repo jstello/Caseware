@@ -12,7 +12,8 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from .agent import build_invoice_agent, build_request_prompt
-from .schemas import PreparedInputSource
+from .reasoning import build_reasoning_envelope, dump_reasoning_envelope
+from .schemas import PreparedInputSource, ThoughtLedgerEntry
 from .settings import Settings, get_settings
 from .tools import InvoiceToolRegistry
 from .trace import MlflowRunRecorder, MlflowTraceSession, TraceWriter
@@ -123,6 +124,7 @@ class InvoiceAgentService:
             return
 
         final_report: dict[str, Any] | None = None
+        thought_ledger_entries: list[dict[str, Any]] = []
         try:
             async for event in runner.run_async(
                 user_id="local-user",
@@ -136,9 +138,14 @@ class InvoiceAgentService:
                     ],
                 ),
             ):
-                pending_progress_message: str | None = None
+                pending_progress_parts: list[str] = []
+                pending_thought_parts: list[types.Part] = []
+                emitted_tool_call = False
                 if event.content:
                     for part in event.content.parts:
+                        if getattr(part, "thought", False):
+                            pending_thought_parts.append(part)
+                            continue
                         if part.text:
                             progress = {
                                 "run_id": run_id,
@@ -146,10 +153,19 @@ class InvoiceAgentService:
                                 "agent": event.author,
                             }
                             trace_writer.write_trace(kind="progress", payload=progress)
-                            pending_progress_message = part.text
+                            pending_progress_parts.append(part.text)
                             yield self._record_sse(trace_writer, "progress", progress)
                         if part.function_call:
+                            emitted_tool_call = True
                             tool_name = part.function_call.name
+                            planner_reasoning = dump_reasoning_envelope(
+                                build_reasoning_envelope(
+                                    source="planner",
+                                    parts=pending_thought_parts,
+                                    usage_metadata=event.usage_metadata,
+                                )
+                            )
+                            progress_text = "\n".join(pending_progress_parts) or None
                             tool_call = {
                                 "run_id": run_id,
                                 "tool_name": tool_name,
@@ -164,14 +180,33 @@ class InvoiceAgentService:
                                     "tool_name": tool_name,
                                     "tool_call_id": part.function_call.id,
                                     "args": tool_call["args"],
+                                    "planner_progress_text": progress_text,
+                                    "planner_reasoning": planner_reasoning,
                                 },
                             )
                             mlflow_trace_session.start_decision_span(
                                 tool_call=tool_call,
-                                planner_message=pending_progress_message,
+                                planner_progress_text=progress_text,
+                                planner_reasoning=planner_reasoning,
                                 agent_name=event.author,
                             )
-                            pending_progress_message = None
+                            if planner_reasoning is not None:
+                                thought_ledger_entries.append(
+                                    ThoughtLedgerEntry(
+                                        step_index=len(thought_ledger_entries) + 1,
+                                        source="planner",
+                                        tool_name=tool_name,
+                                        tool_call_id=part.function_call.id,
+                                        progress_text=progress_text,
+                                        summaries=planner_reasoning["summaries"],
+                                        summary_count=planner_reasoning["summary_count"],
+                                        thoughts_token_count=planner_reasoning["thoughts_token_count"],
+                                        total_token_count=planner_reasoning["total_token_count"],
+                                        has_thought_signature=planner_reasoning["has_thought_signature"],
+                                    ).model_dump(mode="json")
+                                )
+                            pending_progress_parts = []
+                            pending_thought_parts = []
                             yield self._record_sse(trace_writer, "tool_call", tool_call)
                         if part.function_response:
                             tool_name = part.function_response.name
@@ -183,16 +218,41 @@ class InvoiceAgentService:
                                 "stage": self.settings.agent.tool_stages.get(tool_name, "tooling"),
                                 "result": response_payload,
                             }
+                            public_result_payload = _strip_internal_reasoning(response_payload)
+                            public_tool_result = {
+                                **tool_result,
+                                "result": public_result_payload,
+                            }
                             trace_writer.write_trace(
                                 kind="tool_result",
                                 payload={
-                                    "stage": tool_result["stage"],
+                                    "stage": public_tool_result["stage"],
                                     "tool_name": tool_name,
                                     "tool_call_id": part.function_response.id,
                                     "result": response_payload,
                                 },
                             )
-                            yield self._record_sse(trace_writer, "tool_result", tool_result)
+                            tool_reasoning = response_payload.get("reasoning")
+                            if (
+                                tool_name in {"extract_invoice_fields", "categorize_invoice"}
+                                and isinstance(tool_reasoning, dict)
+                            ):
+                                thought_ledger_entries.append(
+                                    ThoughtLedgerEntry(
+                                        step_index=len(thought_ledger_entries) + 1,
+                                        source=tool_reasoning["source"],
+                                        tool_name=tool_name,
+                                        tool_call_id=part.function_response.id,
+                                        summaries=list(tool_reasoning.get("summaries") or []),
+                                        summary_count=int(tool_reasoning.get("summary_count") or 0),
+                                        thoughts_token_count=tool_reasoning.get("thoughts_token_count"),
+                                        total_token_count=tool_reasoning.get("total_token_count"),
+                                        has_thought_signature=bool(
+                                            tool_reasoning.get("has_thought_signature", False)
+                                        ),
+                                    ).model_dump(mode="json")
+                                )
+                            yield self._record_sse(trace_writer, "tool_result", public_tool_result)
                             mlflow_trace_session.complete_decision_span(tool_result)
 
                             if tool_name == "categorize_invoice" and response_payload.get("invoice_result"):
@@ -209,12 +269,45 @@ class InvoiceAgentService:
                                 yield self._record_sse(trace_writer, "invoice_result", invoice_event)
                             if tool_name == "generate_report":
                                 final_report = response_payload
+                    if pending_thought_parts and not emitted_tool_call:
+                        planner_reasoning = dump_reasoning_envelope(
+                            build_reasoning_envelope(
+                                source="planner",
+                                parts=pending_thought_parts,
+                                usage_metadata=event.usage_metadata,
+                            )
+                        )
+                        if planner_reasoning is not None:
+                            progress_text = "\n".join(pending_progress_parts) or None
+                            trace_writer.write_trace(
+                                kind="planner_reasoning",
+                                payload={
+                                    "run_id": run_id,
+                                    "agent": event.author,
+                                    "progress_text": progress_text,
+                                    "planner_reasoning": planner_reasoning,
+                                },
+                            )
+                            thought_ledger_entries.append(
+                                ThoughtLedgerEntry(
+                                    step_index=len(thought_ledger_entries) + 1,
+                                    source="planner",
+                                    progress_text=progress_text,
+                                    summaries=planner_reasoning["summaries"],
+                                    summary_count=planner_reasoning["summary_count"],
+                                    thoughts_token_count=planner_reasoning["thoughts_token_count"],
+                                    total_token_count=planner_reasoning["total_token_count"],
+                                    has_thought_signature=planner_reasoning["has_thought_signature"],
+                                ).model_dump(mode="json")
+                            )
         except Exception as exc:  # pragma: no cover - exercised via manual failure paths
             error_payload = {
                 "run_id": run_id,
                 "error_type": type(exc).__name__,
                 "message": str(exc),
             }
+            if thought_ledger_entries:
+                trace_writer.write_thought_ledger(thought_ledger_entries)
             trace_writer.write_trace(kind="error", payload=error_payload)
             yield self._record_sse(trace_writer, "error", error_payload)
             mlflow_trace_session.fail(error_payload)
@@ -227,6 +320,8 @@ class InvoiceAgentService:
                 "error_type": "RuntimeError",
                 "message": "The run completed without a generated final report.",
             }
+            if thought_ledger_entries:
+                trace_writer.write_thought_ledger(thought_ledger_entries)
             trace_writer.write_trace(kind="error", payload=error_payload)
             yield self._record_sse(trace_writer, "error", error_payload)
             mlflow_trace_session.fail(error_payload)
@@ -234,6 +329,8 @@ class InvoiceAgentService:
             return
 
         trace_writer.write_report(final_report)
+        if thought_ledger_entries:
+            trace_writer.write_thought_ledger(thought_ledger_entries)
         final_payload = {
             "run_id": run_id,
             "report": final_report,
@@ -297,3 +394,19 @@ class InvoiceAgentService:
 
 def get_service() -> InvoiceAgentService:
     return InvoiceAgentService(get_settings())
+
+
+def _strip_internal_reasoning(payload: dict[str, Any]) -> dict[str, Any]:
+    return _strip_reasoning_value(payload)
+
+
+def _strip_reasoning_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_reasoning_value(item)
+            for key, item in value.items()
+            if key != "reasoning"
+        }
+    if isinstance(value, list):
+        return [_strip_reasoning_value(item) for item in value]
+    return value

@@ -8,7 +8,13 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-from .schemas import LiveCategorizationSuggestion, LiveExtractionFields
+from .reasoning import build_reasoning_envelope
+from .schemas import (
+    LiveCategorizationPayload,
+    LiveCategorizationSuggestion,
+    LiveExtractionFields,
+    LiveExtractionPayload,
+)
 from .settings import Settings
 
 
@@ -101,12 +107,24 @@ class GeminiInvoiceToolAdapter:
             ],
             config={
                 "temperature": 0.0,
+                "thinking_config": types.ThinkingConfig(include_thoughts=True),
                 "response_mime_type": "application/json",
-                "response_json_schema": LiveExtractionFields.model_json_schema(),
+                "response_json_schema": LiveExtractionPayload.model_json_schema(),
             },
         )
-        return LiveExtractionFields.model_validate_json(
+        parsed = LiveExtractionPayload.model_validate_json(
             _strip_code_fences(_response_to_text(response))
+        )
+        reasoning = build_reasoning_envelope(
+            source="extract_invoice_fields",
+            parts=getattr(response, "parts", None),
+            usage_metadata=getattr(response, "usage_metadata", None),
+        )
+        return LiveExtractionFields.model_validate(
+            {
+                **parsed.model_dump(mode="json"),
+                "reasoning": reasoning.model_dump(mode="json") if reasoning is not None else None,
+            }
         )
 
     def categorize_invoice(
@@ -127,12 +145,24 @@ class GeminiInvoiceToolAdapter:
             contents=prompt,
             config={
                 "temperature": 0.0,
+                "thinking_config": types.ThinkingConfig(include_thoughts=True),
                 "response_mime_type": "application/json",
-                "response_json_schema": LiveCategorizationSuggestion.model_json_schema(),
+                "response_json_schema": LiveCategorizationPayload.model_json_schema(),
             },
         )
-        suggestion = LiveCategorizationSuggestion.model_validate_json(
+        parsed = LiveCategorizationPayload.model_validate_json(
             _strip_code_fences(_response_to_text(response))
+        )
+        reasoning = build_reasoning_envelope(
+            source="categorize_invoice",
+            parts=getattr(response, "parts", None),
+            usage_metadata=getattr(response, "usage_metadata", None),
+        )
+        suggestion = LiveCategorizationSuggestion.model_validate(
+            {
+                **parsed.model_dump(mode="json"),
+                "reasoning": reasoning.model_dump(mode="json") if reasoning is not None else None,
+            }
         )
         suggestion.confidence = _coerce_float(suggestion.confidence, default=0.5)
         suggestion.notes = [str(note) for note in suggestion.notes]

@@ -9,6 +9,7 @@ from google.adk.tools.tool_context import ToolContext
 
 from .fixtures import load_fixture_manifest, match_fixture_key
 from .live_gemini import GeminiInvoiceToolAdapter
+from .reasoning import dump_reasoning_envelope
 from .schemas import ALLOWED_CATEGORIES, Category
 from .settings import Settings
 from .trace import trace_tool
@@ -126,11 +127,12 @@ class InvoiceToolRegistry:
         invoice["attempts"] = attempts
 
         if self.settings.runtime.planner_mode == "live":
-            payload = self._get_live_adapter().extract_invoice_fields(
+            extraction = self._get_live_adapter().extract_invoice_fields(
                 invoice_path=Path(invoice["path"]),
                 reviewer_prompt=str(tool_context.state.get("run_prompt") or ""),
                 focus_hint=focus_hint,
-            ).model_dump()
+            )
+            payload = extraction.model_dump(mode="json")
             extraction_attempts: list[dict[str, Any]] = []
         else:
             fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
@@ -189,6 +191,8 @@ class InvoiceToolRegistry:
             "needs_retry": needs_retry,
             "retry_focus_hint": retry_focus_hint,
         }
+        if payload.get("reasoning") is not None:
+            result["reasoning"] = payload["reasoning"]
         self._clear_invoice_outputs(invoice, clear_normalized=True)
         self._clear_run_outputs(tool_context)
         invoice["extracted"] = result
@@ -299,6 +303,7 @@ class InvoiceToolRegistry:
             notes = _ensure_list(suggestion.notes) + _ensure_list(normalized.get("notes"))
             category = str(suggestion.category or "Other")
             confidence = float(suggestion.confidence or 0.5)
+            reasoning_payload = dump_reasoning_envelope(suggestion.reasoning)
             if category not in ALLOWED_CATEGORIES:
                 notes.append(
                     f"The live categorizer returned unsupported category '{category}', so it was clamped to Other."
@@ -312,6 +317,7 @@ class InvoiceToolRegistry:
             fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
             categorization = (fixture.get("categorization") or {}).copy()
             notes = _ensure_list(categorization.get("notes")) + _ensure_list(normalized.get("notes"))
+            reasoning_payload = None
 
             category = categorization.get("category", "Other")
             confidence = float(categorization.get("confidence", 0.5))
@@ -350,15 +356,20 @@ class InvoiceToolRegistry:
             "confidence": confidence,
             "notes": _dedupe(notes),
         }
+        if reasoning_payload is not None:
+            invoice["categorized"]["reasoning"] = reasoning_payload
         invoice["invoice_result"] = invoice_result
         self._clear_run_outputs(tool_context)
         invoice["issues"] = _dedupe(invoice.get("issues", []) + invoice_result["notes"])
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
-        return {
+        response = {
             "invoice_id": invoice_id,
             "decision": invoice["categorized"],
             "invoice_result": invoice_result,
         }
+        if reasoning_payload is not None:
+            response["reasoning"] = reasoning_payload
+        return response
 
     @trace_tool()
     def aggregate_invoices(self, tool_context: ToolContext) -> dict[str, Any]:
