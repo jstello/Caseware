@@ -208,7 +208,8 @@ class MlflowTraceSession:
         self,
         *,
         tool_call: dict[str, Any],
-        planner_message: str | None,
+        planner_progress_text: str | None,
+        planner_reasoning: dict[str, Any] | None,
         agent_name: str | None,
     ) -> None:
         if not self.enabled:
@@ -228,6 +229,12 @@ class MlflowTraceSession:
                     "tool.call_id": tool_call["tool_call_id"],
                     "tool.stage": tool_call["stage"],
                     "agent.name": agent_name or "",
+                    "planner.summary_count": int(
+                        (planner_reasoning or {}).get("summary_count", 0)
+                    ),
+                    "planner.has_thought_signature": bool(
+                        (planner_reasoning or {}).get("has_thought_signature", False)
+                    ),
                     **(
                         {"invoice.id": str(invoice_id)}
                         if invoice_id is not None
@@ -235,9 +242,20 @@ class MlflowTraceSession:
                     ),
                 },
             )
+            if (planner_reasoning or {}).get("thoughts_token_count") is not None:
+                decision.span.set_attribute(
+                    "planner.thoughts_token_count",
+                    int(planner_reasoning["thoughts_token_count"]),
+                )
+            if (planner_reasoning or {}).get("total_token_count") is not None:
+                decision.span.set_attribute(
+                    "planner.total_token_count",
+                    int(planner_reasoning["total_token_count"]),
+                )
             decision.span.set_inputs(
                 {
-                    "planner_message": planner_message,
+                    "planner_progress_text": planner_progress_text,
+                    "planner_reasoning": _sanitize_trace_input(planner_reasoning),
                     "tool_call": _sanitize_trace_input(tool_call),
                 }
             )
@@ -385,6 +403,7 @@ class TraceWriter:
         self.run_dir = run_dir
         self.trace_path = run_dir / "trace.jsonl"
         self.sse_path = run_dir / "sse.jsonl"
+        self.thought_ledger_path = run_dir / "thought_ledger.json"
 
     def write_trace(self, *, kind: str, payload: dict[str, Any]) -> None:
         entry = {
@@ -406,6 +425,9 @@ class TraceWriter:
 
     def write_report(self, report: dict[str, Any]) -> None:
         (self.run_dir / "final_report.json").write_text(json.dumps(report, indent=2))
+
+    def write_thought_ledger(self, entries: list[dict[str, Any]]) -> None:
+        self.thought_ledger_path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
 
     def write_prompt_artifacts(
         self,
@@ -520,6 +542,11 @@ class MlflowRunRecorder:
                     mlflow.log_artifact(str(trace_writer.trace_path), artifact_path="traces")
                 if trace_writer.sse_path.exists():
                     mlflow.log_artifact(str(trace_writer.sse_path), artifact_path="traces")
+                if trace_writer.thought_ledger_path.exists():
+                    mlflow.log_artifact(
+                        str(trace_writer.thought_ledger_path),
+                        artifact_path="traces",
+                    )
 
             final_report_path = trace_writer.run_dir / "final_report.json"
             if final_report_path.exists():
@@ -555,6 +582,11 @@ class MlflowRunRecorder:
                     mlflow.log_artifact(str(trace_writer.trace_path), artifact_path="traces")
                 if trace_writer.sse_path.exists():
                     mlflow.log_artifact(str(trace_writer.sse_path), artifact_path="traces")
+                if trace_writer.thought_ledger_path.exists():
+                    mlflow.log_artifact(
+                        str(trace_writer.thought_ledger_path),
+                        artifact_path="traces",
+                    )
 
             if self._run_active:
                 mlflow.end_run(status="FAILED")

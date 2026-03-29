@@ -51,6 +51,20 @@ uv run uvicorn invoice_agent.app:app --reload
 
 The API starts on [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
+## Test In ADK Web
+
+You can also exercise the ADK-native agent directly in the Web UI:
+
+```bash
+uv run adk web
+```
+
+Open [http://127.0.0.1:8000](http://127.0.0.1:8000), choose `invoice_agent`, and start a session.
+
+- If your message includes an absolute local folder path, `load_images` will use that folder.
+- If you do not provide a folder path, ADK Web falls back to the bundled fixture folder at [`fixtures/invoices`](/Users/juan_tello/Documents/Caseware/Caseware-adk-web/fixtures/invoices) so the mock planner is testable out of the box.
+- `adk` does not need to be installed globally, `uv run adk web` is enough.
+
 ## Mock Mode
 
 Mock mode is the intended development and test path.
@@ -170,6 +184,7 @@ uv run pytest -q
 Current coverage includes:
 
 - SSE event ordering and presence
+- ADK Web agent discovery plus end-to-end mock execution
 - Deterministic final totals for the folder path flow
 - Prompt influence on ambiguous categorization
 - Multipart upload support

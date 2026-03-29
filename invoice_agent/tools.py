@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
+import re
 from typing import Any
 
 from google.adk.tools.tool_context import ToolContext
 
 from .fixtures import load_fixture_manifest, match_fixture_key
 from .live_gemini import GeminiInvoiceToolAdapter
+from .reasoning import dump_reasoning_envelope
 from .schemas import ALLOWED_CATEGORIES, Category
 from .settings import Settings
 from .trace import trace_tool
@@ -16,6 +18,9 @@ from .trace import trace_tool
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
 CRITICAL_FIELDS = ("vendor", "invoice_date", "total")
+ABSOLUTE_PATH_PATTERN = re.compile(
+    r'"(?P<double>/[^"]+)"|\'(?P<single>/[^\']+)\'|(?P<plain>/[A-Za-z0-9_./-]+(?:/[A-Za-z0-9_./-]+)+)'
+)
 
 
 def _quantize(value: Decimal) -> float:
@@ -63,16 +68,21 @@ class InvoiceToolRegistry:
         ]
 
     @trace_tool()
-    def load_images(self, tool_context: ToolContext) -> dict[str, Any]:
-        """Discover the invoice image files available for the current run."""
+    def load_images(
+        self,
+        folder_path: str | None = None,
+        tool_context: ToolContext | None = None,
+    ) -> dict[str, Any]:
+        """Discover invoice image files for the current run or an explicit local folder."""
 
-        source = tool_context.state.get("input_source")
-        if not source:
-            raise ValueError("No input source was registered for this run.")
+        if tool_context is None:
+            raise ValueError("load_images requires a tool context.")
 
+        source, notes = self._resolve_input_source(
+            tool_context=tool_context,
+            folder_path=folder_path,
+        )
         source_path = Path(source["path"])
-        if not source_path.is_dir():
-            raise ValueError(f"Input source does not exist: {source_path}")
 
         invoice_refs: list[dict[str, Any]] = []
         working_invoices: dict[str, dict[str, Any]] = {}
@@ -105,7 +115,8 @@ class InvoiceToolRegistry:
         return {
             "invoice_count": len(invoice_refs),
             "invoice_refs": invoice_refs,
-            "notes": (
+            "notes": notes
+            + (
                 ["No invoice images were found in the provided location."]
                 if not invoice_refs
                 else []
@@ -126,11 +137,12 @@ class InvoiceToolRegistry:
         invoice["attempts"] = attempts
 
         if self.settings.runtime.planner_mode == "live":
-            payload = self._get_live_adapter().extract_invoice_fields(
+            extraction = self._get_live_adapter().extract_invoice_fields(
                 invoice_path=Path(invoice["path"]),
                 reviewer_prompt=str(tool_context.state.get("run_prompt") or ""),
                 focus_hint=focus_hint,
-            ).model_dump()
+            )
+            payload = extraction.model_dump(mode="json")
             extraction_attempts: list[dict[str, Any]] = []
         else:
             fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
@@ -189,6 +201,8 @@ class InvoiceToolRegistry:
             "needs_retry": needs_retry,
             "retry_focus_hint": retry_focus_hint,
         }
+        if payload.get("reasoning") is not None:
+            result["reasoning"] = payload["reasoning"]
         self._clear_invoice_outputs(invoice, clear_normalized=True)
         self._clear_run_outputs(tool_context)
         invoice["extracted"] = result
@@ -299,6 +313,7 @@ class InvoiceToolRegistry:
             notes = _ensure_list(suggestion.notes) + _ensure_list(normalized.get("notes"))
             category = str(suggestion.category or "Other")
             confidence = float(suggestion.confidence or 0.5)
+            reasoning_payload = dump_reasoning_envelope(suggestion.reasoning)
             if category not in ALLOWED_CATEGORIES:
                 notes.append(
                     f"The live categorizer returned unsupported category '{category}', so it was clamped to Other."
@@ -312,6 +327,7 @@ class InvoiceToolRegistry:
             fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
             categorization = (fixture.get("categorization") or {}).copy()
             notes = _ensure_list(categorization.get("notes")) + _ensure_list(normalized.get("notes"))
+            reasoning_payload = None
 
             category = categorization.get("category", "Other")
             confidence = float(categorization.get("confidence", 0.5))
@@ -350,15 +366,20 @@ class InvoiceToolRegistry:
             "confidence": confidence,
             "notes": _dedupe(notes),
         }
+        if reasoning_payload is not None:
+            invoice["categorized"]["reasoning"] = reasoning_payload
         invoice["invoice_result"] = invoice_result
         self._clear_run_outputs(tool_context)
         invoice["issues"] = _dedupe(invoice.get("issues", []) + invoice_result["notes"])
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
-        return {
+        response = {
             "invoice_id": invoice_id,
             "decision": invoice["categorized"],
             "invoice_result": invoice_result,
         }
+        if reasoning_payload is not None:
+            response["reasoning"] = reasoning_payload
+        return response
 
     @trace_tool()
     def aggregate_invoices(self, tool_context: ToolContext) -> dict[str, Any]:
@@ -473,3 +494,67 @@ class InvoiceToolRegistry:
         if self.live_adapter is None:
             self.live_adapter = GeminiInvoiceToolAdapter.from_settings(self.settings)
         return self.live_adapter
+
+    def _resolve_input_source(
+        self,
+        *,
+        tool_context: ToolContext,
+        folder_path: str | None,
+    ) -> tuple[dict[str, Any], list[str]]:
+        existing_source = tool_context.state.get("input_source")
+        if isinstance(existing_source, dict) and existing_source.get("path"):
+            return existing_source, []
+
+        user_text = self._user_text(tool_context)
+        resolved_path: Path
+        notes: list[str] = []
+        source_hint = folder_path or self._extract_folder_path_from_text(user_text)
+
+        if source_hint:
+            resolved_path = Path(source_hint).expanduser().resolve()
+            if not resolved_path.exists() or not resolved_path.is_dir():
+                raise ValueError(f"Input source does not exist: {resolved_path}")
+            notes.append(f"Using invoice folder from the current session context: {resolved_path}.")
+        else:
+            resolved_path = self.settings.fixture_dir.resolve()
+            notes.append(
+                f"No folder path was provided, so load_images defaulted to the bundled fixture directory: {resolved_path}."
+            )
+
+        source = {
+            "source_type": "folder",
+            "path": str(resolved_path),
+        }
+        tool_context.state["input_source"] = source
+        if user_text and not tool_context.state.get("run_prompt"):
+            tool_context.state["run_prompt"] = user_text
+        if not tool_context.state.get("allowed_categories"):
+            tool_context.state["allowed_categories"] = list(self.settings.agent.allowed_categories)
+        if not tool_context.state.get("tool_stages"):
+            tool_context.state["tool_stages"] = dict(self.settings.agent.tool_stages)
+        return source, notes
+
+    def _extract_folder_path_from_text(self, text: str | None) -> str | None:
+        if not text:
+            return None
+        for match in ABSOLUTE_PATH_PATTERN.finditer(text):
+            candidate = match.group("double") or match.group("single") or match.group("plain")
+            if not candidate:
+                continue
+            if candidate.startswith("//"):
+                continue
+            return candidate
+        return None
+
+    def _user_text(self, tool_context: ToolContext) -> str | None:
+        user_content = getattr(tool_context, "user_content", None)
+        if user_content is None or not getattr(user_content, "parts", None):
+            return None
+        texts = [
+            part.text.strip()
+            for part in user_content.parts
+            if getattr(part, "text", None) and not getattr(part, "thought", False)
+        ]
+        if not texts:
+            return None
+        return "\n".join(texts)

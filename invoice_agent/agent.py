@@ -7,7 +7,7 @@ from google.adk.models import Gemini
 from google.genai import types
 
 from .mock_planner import MockPlannerLlm
-from .settings import Settings
+from .settings import Settings, get_settings
 from .tools import InvoiceToolRegistry
 
 
@@ -46,7 +46,10 @@ def build_invoice_agent(
             model=settings.runtime.live_model,
             retry_options=types.HttpRetryOptions(attempts=3, initialDelay=1.0),
         )
-        generate_content_config = types.GenerateContentConfig(temperature=0.0)
+        generate_content_config = types.GenerateContentConfig(
+            temperature=0.0,
+            thinking_config=types.ThinkingConfig(include_thoughts=True),
+        )
     else:
         model = MockPlannerLlm()
         generate_content_config = None
@@ -58,6 +61,14 @@ def build_invoice_agent(
         instruction=settings.agent.system_instruction,
         generate_content_config=generate_content_config,
         tools=invoice_tools.tool_functions(),
+    )
+
+
+def build_root_agent(settings: Settings | None = None) -> LlmAgent:
+    effective_settings = settings or get_settings()
+    return build_invoice_agent(
+        effective_settings,
+        InvoiceToolRegistry(effective_settings),
     )
 
 
@@ -85,3 +96,6 @@ def describe_invoice_agent_pattern() -> AgentPatternSummary:
     """Return the recommended layout summary for docs and tests."""
 
     return INVOICE_AGENT_PATTERN
+
+
+root_agent = build_root_agent()

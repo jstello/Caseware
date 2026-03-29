@@ -4,8 +4,10 @@ from google.adk.models import Gemini
 
 from invoice_agent.agent import (
     build_invoice_agent,
+    build_root_agent,
     build_request_prompt,
     describe_invoice_agent_pattern,
+    root_agent,
 )
 from invoice_agent.settings import Settings
 from invoice_agent.tools import InvoiceToolRegistry
@@ -64,3 +66,23 @@ def test_live_invoice_agent_uses_gemini_with_low_temperature() -> None:
     assert agent.model.model == settings.runtime.live_model
     assert agent.generate_content_config is not None
     assert agent.generate_content_config.temperature == 0.0
+    assert agent.generate_content_config.thinking_config is not None
+    assert agent.generate_content_config.thinking_config.include_thoughts is True
+
+
+def test_root_agent_is_exported_for_adk_web_loading() -> None:
+    built_root = build_root_agent(Settings(planner_mode="mock"))
+
+    assert root_agent.name == "invoice_agent"
+    assert built_root.name == "invoice_agent"
+    assert [
+        getattr(tool, "name", getattr(tool, "__name__", ""))
+        for tool in root_agent.tools
+    ] == [
+        "load_images",
+        "extract_invoice_fields",
+        "normalize_invoice",
+        "categorize_invoice",
+        "aggregate_invoices",
+        "generate_report",
+    ]

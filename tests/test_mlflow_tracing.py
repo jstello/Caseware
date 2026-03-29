@@ -5,6 +5,10 @@ from pathlib import Path
 
 import mlflow
 from mlflow.tracking import MlflowClient
+from google.adk.agents import LlmAgent
+from google.adk.models.base_llm import BaseLlm
+from google.adk.models.llm_response import LlmResponse
+from google.genai import types
 
 from invoice_agent.config import (
     ROOT_DIR,
@@ -16,11 +20,169 @@ from invoice_agent.config import (
     load_invoice_agent_config,
 )
 from invoice_agent.service import InvoiceAgentService
+from invoice_agent.schemas import LiveCategorizationSuggestion, LiveExtractionFields, ReasoningEnvelope
 from invoice_agent.settings import Settings
 from invoice_agent.trace import MlflowRunRecorder, TraceWriter
 
 
 FIXTURE_DIR = Path("/Users/juan_tello/Documents/Caseware/Caseware/fixtures/invoices")
+
+
+class ThoughtTracingPlanner(BaseLlm):
+    model: str = "thought-tracing-planner"
+
+    async def generate_content_async(self, llm_request, stream: bool = False):
+        responses_by_tool: dict[str, dict] = {}
+        for content in llm_request.contents:
+            if not content or not content.parts:
+                continue
+            for part in content.parts:
+                if part.function_response:
+                    responses_by_tool[part.function_response.name] = dict(
+                        part.function_response.response or {}
+                    )
+
+        load_response = responses_by_tool.get("load_images")
+        if load_response is None:
+            yield _planner_response(
+                text="I will inspect the available invoices first.",
+                thought="I should load the folder before choosing the next tool.",
+                tool_name="load_images",
+                args={},
+                call_id="mlflow-load-images-1",
+            )
+            return
+
+        invoice_ref = load_response["invoice_refs"][0]
+        invoice_id = invoice_ref["invoice_id"]
+        if "extract_invoice_fields" not in responses_by_tool:
+            yield _planner_response(
+                text=f"I will extract the fields for {invoice_ref['filename']}.",
+                thought="Extraction is the next step because I need structured invoice fields.",
+                tool_name="extract_invoice_fields",
+                args={"invoice_id": invoice_id},
+                call_id="mlflow-extract-1",
+            )
+            return
+
+        if "normalize_invoice" not in responses_by_tool:
+            yield _planner_response(
+                text=f"I have enough detail to normalize {invoice_ref['filename']}.",
+                thought="The extraction reasoning is available, so I can normalize the invoice safely.",
+                tool_name="normalize_invoice",
+                args={"invoice_id": invoice_id},
+                call_id="mlflow-normalize-1",
+            )
+            return
+
+        if "categorize_invoice" not in responses_by_tool:
+            yield _planner_response(
+                text=f"I will categorize {invoice_ref['filename']} next.",
+                thought="Normalization is complete, so categorization is the next planner decision.",
+                tool_name="categorize_invoice",
+                args={"invoice_id": invoice_id},
+                call_id="mlflow-categorize-1",
+            )
+            return
+
+        if "aggregate_invoices" not in responses_by_tool:
+            yield _planner_response(
+                text="Every invoice is categorized, so I will aggregate the totals.",
+                thought="I can aggregate now that each invoice has a final category.",
+                tool_name="aggregate_invoices",
+                args={},
+                call_id="mlflow-aggregate-1",
+            )
+            return
+
+        if "generate_report" not in responses_by_tool:
+            yield _planner_response(
+                text="The totals are ready, and I can assemble the report.",
+                thought="The last planner action is to generate the final report.",
+                tool_name="generate_report",
+                args={},
+                call_id="mlflow-report-1",
+            )
+            return
+
+        yield LlmResponse(
+            content=types.Content(role="model", parts=[types.Part(text="The report is complete.")]),
+            partial=False,
+        )
+
+
+class _TraceReasoningLiveAdapter:
+    def extract_invoice_fields(self, *, invoice_path: Path, reviewer_prompt: str | None, focus_hint: str | None):
+        return LiveExtractionFields(
+            vendor="Trace Air",
+            invoice_date="2026-02-15",
+            invoice_number="TRACE-1007",
+            total=642.10,
+            currency="USD",
+            raw_category_hint="airfare",
+            extraction_confidence=0.93,
+            notes=["The invoice is legible."],
+            reasoning=ReasoningEnvelope(
+                summaries=["The airfare invoice clearly exposes vendor and total."],
+                summary_count=1,
+                thoughts_token_count=6,
+                total_token_count=25,
+                has_thought_signature=False,
+                source="extract_invoice_fields",
+            ),
+        )
+
+    def categorize_invoice(
+        self,
+        *,
+        normalized_invoice: dict,
+        raw_category_hint: str | None,
+        reviewer_prompt: str | None,
+    ):
+        return LiveCategorizationSuggestion(
+            category="Travel",
+            confidence=0.88,
+            notes=["Airfare maps to Travel."],
+            reasoning=ReasoningEnvelope(
+                summaries=["Travel is the closest allowed category for airfare."],
+                summary_count=1,
+                thoughts_token_count=5,
+                total_token_count=19,
+                has_thought_signature=False,
+                source="categorize_invoice",
+            ),
+        )
+
+
+def _planner_response(
+    *,
+    text: str,
+    tool_name: str,
+    args: dict | None,
+    call_id: str,
+    thought: str,
+) -> LlmResponse:
+    return LlmResponse(
+        content=types.Content(
+            role="model",
+            parts=[
+                types.Part(
+                    text=thought,
+                    thought=True,
+                    thought_signature=f"{call_id}-signature".encode("utf-8"),
+                ),
+                types.Part(text=text),
+                types.Part(
+                    function_call=types.FunctionCall(
+                        id=call_id,
+                        name=tool_name,
+                        args=args or {},
+                    )
+                ),
+            ],
+        ),
+        partial=False,
+    )
 
 
 def test_mlflow_recorder_logs_to_local_sqlite_store(tmp_path: Path) -> None:

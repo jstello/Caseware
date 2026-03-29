@@ -7,3 +7,5 @@ artifacts/runs/*
 artifacts/mlflow/*
 !artifacts/mlflow/.gitkeep
 mlflow.db
+.gstack/
+.adk/
