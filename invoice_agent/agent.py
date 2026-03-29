@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from google.adk.agents import LlmAgent
+from google.adk.models import Gemini
+from google.genai import types
 
 from .mock_planner import MockPlannerLlm
 from .settings import Settings
@@ -39,23 +41,44 @@ def build_invoice_agent(
 ) -> LlmAgent:
     """Build the root invoice agent from the effective YAML-backed config."""
 
-    model = (
-        settings.runtime.live_model
-        if settings.runtime.planner_mode == "live"
-        else MockPlannerLlm()
-    )
+    if settings.runtime.planner_mode == "live":
+        model = Gemini(
+            model=settings.runtime.live_model,
+            retry_options=types.HttpRetryOptions(attempts=3, initialDelay=1.0),
+        )
+        generate_content_config = types.GenerateContentConfig(temperature=0.0)
+    else:
+        model = MockPlannerLlm()
+        generate_content_config = None
+
     return LlmAgent(
         name=settings.agent.name,
         model=model,
         description=settings.agent.description,
         instruction=settings.agent.system_instruction,
+        generate_content_config=generate_content_config,
         tools=invoice_tools.tool_functions(),
     )
 
 
 def build_request_prompt(settings: Settings, prompt: str | None) -> str:
     reviewer_prompt = prompt or "none"
-    return settings.agent.request_prompt_template.format(prompt=reviewer_prompt)
+    allowed_categories = ", ".join(settings.agent.allowed_categories)
+    tool_registry = ", ".join(
+        [
+            "load_images",
+            "extract_invoice_fields",
+            "normalize_invoice",
+            "categorize_invoice",
+            "aggregate_invoices",
+            "generate_report",
+        ]
+    )
+    return settings.agent.request_prompt_template.format(
+        prompt=reviewer_prompt,
+        allowed_categories=allowed_categories,
+        tool_registry=tool_registry,
+    )
 
 
 def describe_invoice_agent_pattern() -> AgentPatternSummary:

@@ -1,11 +1,26 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
+import mlflow
 from mlflow.tracking import MlflowClient
 
-from invoice_agent.config import AgentConfig, InvoiceAgentConfig, RuntimeConfig, TracingConfig
+from invoice_agent.config import (
+    ROOT_DIR,
+    AgentConfig,
+    InvoiceAgentConfig,
+    RuntimeConfig,
+    TracingConfig,
+    config_to_artifact_text,
+    load_invoice_agent_config,
+)
+from invoice_agent.service import InvoiceAgentService
+from invoice_agent.settings import Settings
 from invoice_agent.trace import MlflowRunRecorder, TraceWriter
+
+
+FIXTURE_DIR = Path("/Users/juan_tello/Documents/Caseware/Caseware/fixtures/invoices")
 
 
 def test_mlflow_recorder_logs_to_local_sqlite_store(tmp_path: Path) -> None:
@@ -142,3 +157,98 @@ tracing:
     assert run.data.tags["run_id"] == "run-123"
     assert client.list_artifacts(run.info.run_id, "config")
     assert client.list_artifacts(run.info.run_id, "traces")
+
+
+def test_mlflow_groups_invoice_execution_under_one_nested_trace(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("INVOICE_AGENT_MLFLOW_ENABLED", "true")
+    base_config = load_invoice_agent_config(ROOT_DIR / "config" / "invoice_agent.yaml")
+    config = base_config.model_copy(
+        update={
+            "runtime": base_config.runtime.model_copy(
+                update={
+                    "traces_dir": tmp_path / "runs",
+                    "mlflow_tracking_dir": tmp_path / "mlflow",
+                    "fixture_manifest_path": FIXTURE_DIR / "manifest.json",
+                }
+            ),
+            "tracing": base_config.tracing.model_copy(
+                update={
+                    "experiment_name": "invoice-agent-nested-trace-test",
+                    "enable_async_logging": False,
+                }
+            ),
+        }
+    )
+    config_path = tmp_path / "invoice_agent.yaml"
+    config_path.write_text(config_to_artifact_text(config), encoding="utf-8")
+
+    settings = Settings(config_path=config_path)
+    service = InvoiceAgentService(settings)
+
+    async def run_stream_once() -> tuple[str, list[dict[str, str]]]:
+        run_id = service.new_run_id()
+        run_dir = service.create_run_dir(run_id)
+        prepared_input = await service.prepare_folder_input(str(FIXTURE_DIR))
+        events: list[dict[str, str]] = []
+        async for event in service.run_stream(
+            run_id=run_id,
+            run_dir=run_dir,
+            prepared_input=prepared_input,
+            prompt="Use conservative categorization and flag unusual invoices.",
+        ):
+            events.append(event)
+        return run_id, events
+
+    run_id, events = asyncio.run(run_stream_once())
+
+    assert events[0]["event"] == "run_started"
+    assert events[-1]["event"] == "final_result"
+
+    tracking_uri = f"sqlite:///{config.runtime.mlflow_tracking_dir / 'mlflow.db'}"
+    client = MlflowClient(tracking_uri=tracking_uri)
+    experiment = client.get_experiment_by_name("invoice-agent-nested-trace-test")
+    assert experiment is not None
+
+    traces = client.search_traces(experiment_ids=[experiment.experiment_id], max_results=10)
+    assert len(traces) == 1
+
+    trace = mlflow.get_trace(traces[0].info.trace_id)
+    spans_by_name = {span.name: span for span in trace.data.spans}
+
+    root_name = f"invoice_agent_run:{run_id}"
+    assert root_name in spans_by_name
+    assert spans_by_name[root_name].parent_id is None
+    assert spans_by_name[root_name].span_type == "AGENT"
+
+    bright_invoice = spans_by_name["invoice:bright-stationery-noisy"]
+    assert bright_invoice.parent_id == spans_by_name[root_name].span_id
+    assert bright_invoice.span_type == "TASK"
+
+    extract_decisions = [
+        span
+        for span in trace.data.spans
+        if span.name == "planner:extract_invoice_fields"
+        and span.attributes.get("invoice.id") == "bright-stationery-noisy"
+    ]
+    assert len(extract_decisions) == 2
+    assert all(span.parent_id == bright_invoice.span_id for span in extract_decisions)
+
+    extract_tools = [
+        span
+        for span in trace.data.spans
+        if span.name == "extract_invoice_fields"
+        and span.attributes.get("invoice.id") == "bright-stationery-noisy"
+    ]
+    assert len(extract_tools) == 2
+    assert {span.parent_id for span in extract_tools} == {
+        span.span_id for span in extract_decisions
+    }
+    assert all(span.attributes.get("tool.stage") == "extraction" for span in extract_tools)
+    assert all(span.attributes.get("tool.call_id") for span in extract_tools)
+
+    report_decision = spans_by_name["planner:generate_report"]
+    report_tool = spans_by_name["generate_report"]
+    assert report_decision.parent_id == spans_by_name[root_name].span_id
+    assert report_tool.parent_id == report_decision.span_id
+    assert report_tool.attributes.get("tool.stage") == "reporting"
+    assert report_tool.attributes.get("tool.call_id")

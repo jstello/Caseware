@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, AsyncGenerator
 from uuid import uuid4
@@ -14,7 +15,7 @@ from .agent import build_invoice_agent, build_request_prompt
 from .schemas import PreparedInputSource
 from .settings import Settings, get_settings
 from .tools import InvoiceToolRegistry
-from .trace import MlflowRunRecorder, TraceWriter
+from .trace import MlflowRunRecorder, MlflowTraceSession, TraceWriter
 
 
 class InvoiceAgentService:
@@ -61,15 +62,24 @@ class InvoiceAgentService:
         prepared_input: PreparedInputSource,
         prompt: str | None,
     ) -> AsyncGenerator[dict[str, Any], None]:
+        effective_request_prompt = build_request_prompt(self.settings, prompt)
         trace_writer = TraceWriter(run_dir)
+        trace_writer.write_prompt_artifacts(
+            system_instruction=self.settings.agent.system_instruction,
+            request_prompt=effective_request_prompt,
+        )
         mlflow_recorder = MlflowRunRecorder(
             run_id=run_id,
             run_dir=run_dir,
             config_path=self.settings.config_path,
             config=self.settings.config,
-            prompt=prompt,
+            prompt=effective_request_prompt,
         )
         mlflow_recorder.start()
+        mlflow_trace_session = MlflowTraceSession(
+            run_id=run_id,
+            enabled=mlflow_recorder.enabled,
+        )
         invoice_tools = InvoiceToolRegistry(self.settings)
         agent = build_invoice_agent(self.settings, invoice_tools)
         session_service = InMemorySessionService()
@@ -81,7 +91,9 @@ class InvoiceAgentService:
         initial_state = {
             "input_source": prepared_input.model_dump(),
             "run_prompt": prompt or "",
+            "effective_request_prompt": effective_request_prompt,
             "allowed_categories": list(self.settings.agent.allowed_categories),
+            "tool_stages": dict(self.settings.agent.tool_stages),
         }
         await session_service.create_session(
             app_name=self.settings.app_name,
@@ -97,7 +109,16 @@ class InvoiceAgentService:
             "prompt": prompt,
         }
         trace_writer.write_trace(kind="run_started", payload=run_started)
+        mlflow_trace_session.start(run_started)
         yield self._record_sse(trace_writer, "run_started", run_started)
+
+        live_configuration_error = self._live_configuration_error(run_id)
+        if live_configuration_error is not None:
+            trace_writer.write_trace(kind="error", payload=live_configuration_error)
+            yield self._record_sse(trace_writer, "error", live_configuration_error)
+            mlflow_trace_session.fail(live_configuration_error)
+            mlflow_recorder.finalize_error(trace_writer, live_configuration_error)
+            return
 
         final_report: dict[str, Any] | None = None
         try:
@@ -108,11 +129,12 @@ class InvoiceAgentService:
                     role="user",
                     parts=[
                         types.Part(
-                            text=build_request_prompt(self.settings, prompt)
+                            text=effective_request_prompt
                         )
                     ],
                 ),
             ):
+                pending_progress_message: str | None = None
                 if event.content:
                     for part in event.content.parts:
                         if part.text:
@@ -122,6 +144,7 @@ class InvoiceAgentService:
                                 "agent": event.author,
                             }
                             trace_writer.write_trace(kind="progress", payload=progress)
+                            pending_progress_message = part.text
                             yield self._record_sse(trace_writer, "progress", progress)
                         if part.function_call:
                             tool_name = part.function_call.name
@@ -141,6 +164,12 @@ class InvoiceAgentService:
                                     "args": tool_call["args"],
                                 },
                             )
+                            mlflow_trace_session.start_decision_span(
+                                tool_call=tool_call,
+                                planner_message=pending_progress_message,
+                                agent_name=event.author,
+                            )
+                            pending_progress_message = None
                             yield self._record_sse(trace_writer, "tool_call", tool_call)
                         if part.function_response:
                             tool_name = part.function_response.name
@@ -162,6 +191,7 @@ class InvoiceAgentService:
                                 },
                             )
                             yield self._record_sse(trace_writer, "tool_result", tool_result)
+                            mlflow_trace_session.complete_decision_span(tool_result)
 
                             if tool_name == "categorize_invoice" and response_payload.get("invoice_result"):
                                 invoice_event = {
@@ -173,6 +203,7 @@ class InvoiceAgentService:
                                     kind="invoice_result",
                                     payload=invoice_event,
                                 )
+                                mlflow_trace_session.complete_invoice_span(invoice_event)
                                 yield self._record_sse(trace_writer, "invoice_result", invoice_event)
                             if tool_name == "generate_report":
                                 final_report = response_payload
@@ -184,6 +215,7 @@ class InvoiceAgentService:
             }
             trace_writer.write_trace(kind="error", payload=error_payload)
             yield self._record_sse(trace_writer, "error", error_payload)
+            mlflow_trace_session.fail(error_payload)
             mlflow_recorder.finalize_error(trace_writer, error_payload)
             return
 
@@ -195,6 +227,7 @@ class InvoiceAgentService:
             }
             trace_writer.write_trace(kind="error", payload=error_payload)
             yield self._record_sse(trace_writer, "error", error_payload)
+            mlflow_trace_session.fail(error_payload)
             mlflow_recorder.finalize_error(trace_writer, error_payload)
             return
 
@@ -211,6 +244,7 @@ class InvoiceAgentService:
             payload={"report": final_report},
         )
         yield self._record_sse(trace_writer, "final_result", final_payload)
+        mlflow_trace_session.complete(final_payload)
         mlflow_recorder.finalize(trace_writer, final_report)
 
     def _record_sse(
@@ -218,6 +252,41 @@ class InvoiceAgentService:
     ) -> dict[str, Any]:
         trace_writer.write_sse(event=event, data=data)
         return {"event": event, "data": json.dumps(data)}
+
+    def _live_configuration_error(self, run_id: str) -> dict[str, Any] | None:
+        if self.settings.runtime.planner_mode != "live":
+            return None
+
+        use_vertex = os.getenv("GOOGLE_GENAI_USE_VERTEXAI", "").strip().lower() == "true"
+        if use_vertex:
+            missing = [
+                name
+                for name in ("GOOGLE_CLOUD_PROJECT", "GOOGLE_CLOUD_LOCATION")
+                if not os.getenv(name)
+            ]
+            if not missing:
+                return None
+            return {
+                "run_id": run_id,
+                "error_type": "LiveConfigurationError",
+                "message": (
+                    "planner_mode=live with GOOGLE_GENAI_USE_VERTEXAI=true requires "
+                    f"{', '.join(missing)} to be set before the run starts."
+                ),
+            }
+
+        if os.getenv("GOOGLE_API_KEY"):
+            return None
+
+        return {
+            "run_id": run_id,
+            "error_type": "LiveConfigurationError",
+            "message": (
+                "planner_mode=live requires either GOOGLE_API_KEY for Gemini API access "
+                "or GOOGLE_GENAI_USE_VERTEXAI=true together with GOOGLE_CLOUD_PROJECT "
+                "and GOOGLE_CLOUD_LOCATION."
+            ),
+        }
 
 
 def get_service() -> InvoiceAgentService:

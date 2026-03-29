@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from google.adk.models import Gemini
+
 from invoice_agent.agent import (
     build_invoice_agent,
+    build_request_prompt,
     describe_invoice_agent_pattern,
 )
 from invoice_agent.settings import Settings
@@ -37,3 +40,27 @@ def test_invoice_agent_pattern_prefers_planner_over_parallel_fanout() -> None:
     assert "SequentialAgent" in summary.sequential
     assert "ParallelAgent" in summary.parallel
     assert "retry" in summary.loop.lower() or "planner" in summary.loop.lower()
+
+
+def test_request_prompt_includes_allowed_categories_and_completion_guardrail() -> None:
+    settings = Settings(planner_mode="mock")
+
+    prompt = build_request_prompt(settings, "Use conservative categorization.")
+
+    assert "Allowed final categories:" in prompt
+    assert "Travel" in prompt
+    assert "generate_report" in prompt
+    assert "Do not finalize early." in prompt
+    assert "Use conservative categorization." in prompt
+
+
+def test_live_invoice_agent_uses_gemini_with_low_temperature() -> None:
+    settings = Settings(planner_mode="live")
+    tools = InvoiceToolRegistry(settings)
+
+    agent = build_invoice_agent(settings, tools)
+
+    assert isinstance(agent.model, Gemini)
+    assert agent.model.model == settings.runtime.live_model
+    assert agent.generate_content_config is not None
+    assert agent.generate_content_config.temperature == 0.0

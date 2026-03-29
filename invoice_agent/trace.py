@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
+from dataclasses import dataclass
 from functools import wraps
 from datetime import UTC, datetime
 from pathlib import Path
@@ -64,16 +65,270 @@ def trace_tool(name: str | None = None):
                 for key, value in bound.arguments.items()
                 if key not in {"self", "tool_context"}
             }
+            tool_context = bound.arguments.get("tool_context")
+            invoice_id = sanitized_inputs.get("invoice_id")
+            attributes = {
+                "tool.name": name or func.__name__,
+                "tool.has_invoice": invoice_id is not None,
+            }
+            if invoice_id is not None:
+                attributes["invoice.id"] = str(invoice_id)
+            if isinstance(tool_context, ToolContext):
+                stage = tool_context.state.get("trace_current_stage")
+                if stage is None:
+                    stage = (tool_context.state.get("tool_stages") or {}).get(
+                        name or func.__name__
+                    )
+                if stage is not None:
+                    attributes["tool.stage"] = str(stage)
+                tool_call_id = (
+                    tool_context.state.get("trace_current_tool_call_id")
+                    or getattr(tool_context, "function_call_id", None)
+                )
+                if tool_call_id is not None:
+                    attributes["tool.call_id"] = str(tool_call_id)
 
-            @mlflow.trace(name=name or func.__name__)
-            def invoke(tool_inputs: dict[str, Any]):
-                return func(*args, **kwargs)
-
-            return invoke(sanitized_inputs)
+            with mlflow.start_span(
+                name=name or func.__name__,
+                span_type="TOOL",
+                attributes=attributes,
+            ) as span:
+                span.set_inputs({"tool_inputs": sanitized_inputs})
+                try:
+                    result = func(*args, **kwargs)
+                except Exception as exc:
+                    span.set_status("ERROR")
+                    span.set_outputs(
+                        {
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                            }
+                        }
+                    )
+                    raise
+                span.set_outputs(_sanitize_trace_input(result))
+                return result
 
         return wrapper
 
     return decorator
+
+
+@dataclass
+class _ManagedSpan:
+    context_manager: Any
+    span: Any
+
+    def close(self) -> None:
+        self.context_manager.__exit__(None, None, None)
+
+
+class MlflowTraceSession:
+    """Maintains one nested MLflow trace for the full run lifecycle."""
+
+    def __init__(self, *, run_id: str, enabled: bool) -> None:
+        self.run_id = run_id
+        self.enabled = enabled and mlflow is not None
+        self._root_span: _ManagedSpan | None = None
+        self._invoice_spans: dict[str, _ManagedSpan] = {}
+        self._decision_spans: dict[str, _ManagedSpan] = {}
+
+    def start(self, run_started: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+
+        try:
+            root = self._open_span(
+                name=f"invoice_agent_run:{self.run_id}",
+                span_type="AGENT",
+                attributes={
+                    "run.id": self.run_id,
+                    "planner.mode": str(run_started.get("mode")),
+                    "input.source_type": str(
+                        (run_started.get("input_source") or {}).get("source_type")
+                    ),
+                    "input.path": str((run_started.get("input_source") or {}).get("path")),
+                    "input.has_prompt": run_started.get("prompt") not in (None, ""),
+                },
+            )
+            root.span.set_inputs(_sanitize_trace_input(run_started))
+            self._root_span = root
+        except Exception:
+            self._disable()
+
+    def start_decision_span(
+        self,
+        *,
+        tool_call: dict[str, Any],
+        planner_message: str | None,
+        agent_name: str | None,
+    ) -> None:
+        if not self.enabled:
+            return
+
+        try:
+            invoice_id = tool_call["args"].get("invoice_id")
+            if invoice_id is not None:
+                self._ensure_invoice_span(str(invoice_id))
+
+            decision = self._open_span(
+                name=f"planner:{tool_call['tool_name']}",
+                span_type="CHAIN",
+                attributes={
+                    "run.id": self.run_id,
+                    "tool.name": tool_call["tool_name"],
+                    "tool.call_id": tool_call["tool_call_id"],
+                    "tool.stage": tool_call["stage"],
+                    "agent.name": agent_name or "",
+                    **(
+                        {"invoice.id": str(invoice_id)}
+                        if invoice_id is not None
+                        else {}
+                    ),
+                },
+            )
+            decision.span.set_inputs(
+                {
+                    "planner_message": planner_message,
+                    "tool_call": _sanitize_trace_input(tool_call),
+                }
+            )
+            self._decision_spans[tool_call["tool_call_id"]] = decision
+        except Exception:
+            self._disable()
+
+    def complete_decision_span(self, tool_result: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+
+        try:
+            decision = self._decision_spans.pop(tool_result["tool_call_id"], None)
+            if decision is None:
+                return
+            decision.span.set_outputs({"tool_result": _sanitize_trace_input(tool_result)})
+            decision.close()
+        except Exception:
+            self._disable()
+
+    def complete_invoice_span(self, invoice_event: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+
+        try:
+            invoice_id = str(invoice_event["invoice_id"])
+            invoice_span = self._invoice_spans.pop(invoice_id, None)
+            if invoice_span is None:
+                return
+            invoice_span.span.set_outputs({"invoice": _sanitize_trace_input(invoice_event["invoice"])})
+            invoice_span.close()
+        except Exception:
+            self._disable()
+
+    def complete(self, final_payload: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+
+        try:
+            self._close_all_open_decisions()
+            self._close_all_open_invoices()
+            if self._root_span is not None:
+                report = final_payload.get("report") or {}
+                summary = report.get("run_summary") or {}
+                self._root_span.span.set_outputs(
+                    {
+                        "run_summary": _sanitize_trace_input(summary),
+                        "report_path": final_payload.get("report_path"),
+                        "trace_path": final_payload.get("trace_path"),
+                        "sse_path": final_payload.get("sse_path"),
+                    }
+                )
+                self._root_span.close()
+                self._root_span = None
+        except Exception:
+            self._disable()
+
+    def fail(self, error_payload: dict[str, Any]) -> None:
+        if not self.enabled:
+            return
+
+        try:
+            for decision in list(self._decision_spans.values()):
+                decision.span.set_status("ERROR")
+                decision.span.set_outputs({"error": _sanitize_trace_input(error_payload)})
+                decision.close()
+            self._decision_spans.clear()
+
+            for invoice_span in list(self._invoice_spans.values()):
+                invoice_span.span.set_status("ERROR")
+                invoice_span.span.set_outputs({"error": _sanitize_trace_input(error_payload)})
+                invoice_span.close()
+            self._invoice_spans.clear()
+
+            if self._root_span is not None:
+                self._root_span.span.set_status("ERROR")
+                self._root_span.span.set_outputs({"error": _sanitize_trace_input(error_payload)})
+                self._root_span.close()
+                self._root_span = None
+        except Exception:
+            self._disable()
+
+    def _ensure_invoice_span(self, invoice_id: str) -> None:
+        for active_invoice_id in list(self._invoice_spans):
+            if active_invoice_id != invoice_id:
+                invoice_span = self._invoice_spans.pop(active_invoice_id)
+                invoice_span.close()
+
+        if invoice_id in self._invoice_spans:
+            return
+
+        self._invoice_spans[invoice_id] = self._open_span(
+            name=f"invoice:{invoice_id}",
+            span_type="TASK",
+            attributes={
+                "run.id": self.run_id,
+                "invoice.id": invoice_id,
+            },
+        )
+        self._invoice_spans[invoice_id].span.set_inputs({"invoice_id": invoice_id})
+
+    def _close_all_open_decisions(self) -> None:
+        for decision in list(self._decision_spans.values()):
+            decision.close()
+        self._decision_spans.clear()
+
+    def _close_all_open_invoices(self) -> None:
+        for invoice_span in list(self._invoice_spans.values()):
+            invoice_span.close()
+        self._invoice_spans.clear()
+
+    def _open_span(
+        self,
+        *,
+        name: str,
+        span_type: str,
+        attributes: dict[str, Any] | None = None,
+    ) -> _ManagedSpan:
+        context_manager = mlflow.start_span(
+            name=name,
+            span_type=span_type,
+            attributes=_sanitize_trace_input(attributes or {}),
+        )
+        return _ManagedSpan(
+            context_manager=context_manager,
+            span=context_manager.__enter__(),
+        )
+
+    def _disable(self) -> None:
+        try:
+            self._close_all_open_decisions()
+            self._close_all_open_invoices()
+            if self._root_span is not None:
+                self._root_span.close()
+        except Exception:
+            pass
+        self.enabled = False
+        self._root_span = None
 
 
 class TraceWriter:
@@ -104,6 +359,23 @@ class TraceWriter:
 
     def write_report(self, report: dict[str, Any]) -> None:
         (self.run_dir / "final_report.json").write_text(json.dumps(report, indent=2))
+
+    def write_prompt_artifacts(
+        self,
+        *,
+        system_instruction: str,
+        request_prompt: str,
+    ) -> None:
+        prompt_dir = self.run_dir / "prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        (prompt_dir / "system_instruction.txt").write_text(
+            system_instruction,
+            encoding="utf-8",
+        )
+        (prompt_dir / "request_prompt.txt").write_text(
+            request_prompt,
+            encoding="utf-8",
+        )
 
     def _append(self, path: Path, payload: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -174,10 +446,13 @@ class MlflowRunRecorder:
                 mlflow.log_artifact(str(config_artifact), artifact_path="config")
 
             if self.config.tracing.log_prompt_artifacts and self.prompt is not None:
-                prompt_path = self.run_dir / "prompts" / "request_prompt.txt"
-                prompt_path.parent.mkdir(parents=True, exist_ok=True)
-                prompt_path.write_text(self.prompt, encoding="utf-8")
-                mlflow.log_artifact(str(prompt_path), artifact_path="prompts")
+                prompt_dir = self.run_dir / "prompts"
+                prompt_dir.mkdir(parents=True, exist_ok=True)
+                prompt_path = prompt_dir / "request_prompt.txt"
+                if not prompt_path.exists():
+                    prompt_path.write_text(self.prompt, encoding="utf-8")
+                for artifact in sorted(prompt_dir.glob("*.txt")):
+                    mlflow.log_artifact(str(artifact), artifact_path="prompts")
         except Exception:  # pragma: no cover - tracing must not block the run
             self.enabled = False
             self._run_active = False

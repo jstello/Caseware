@@ -58,6 +58,7 @@ Mock mode is the intended development and test path.
 - It keeps invoice access constrained to the registered tools.
 - It uses deterministic synthetic fixtures so traces and tests are reviewable.
 - One fixture intentionally triggers a second extraction attempt to prove the planner makes a tool decision from intermediate results.
+- The runtime blocks premature `aggregate_invoices` or `generate_report` calls until every loaded invoice has been categorized.
 
 ## Optional Live Planner Mode
 
@@ -72,12 +73,15 @@ uv run uvicorn invoice_agent.app:app --reload
 ```
 
 The repository intentionally does not read `.env` or `.env.*` files.
+If `INVOICE_AGENT_PLANNER_MODE=live` is set without either `GOOGLE_API_KEY` or a valid Vertex setup (`GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`), the stream emits `run_started` followed by a `LiveConfigurationError`.
 
 ## MLflow Tracing
 
 MLflow tracing is enabled by default and writes to a local SQLite-backed store under [`artifacts/mlflow`](/Users/juan_tello/Documents/Caseware/Caseware/artifacts/mlflow).
 
 - Each run logs flattened config params, tags, metrics, the effective YAML config artifact, the request prompt artifact, the JSONL trace, the SSE log, and the final report.
+- The saved request prompt artifact captures the effective planner prompt the model saw after template expansion, not just the optional reviewer hint.
+- The run directory also keeps `prompts/system_instruction.txt` and `prompts/request_prompt.txt` so prompt review still works when MLflow is disabled.
 - Tool execution is traced with lightweight decorator-based MLflow spans while the existing JSONL trace remains the reviewer-friendly source of truth.
 - You can point to another MLflow backend by setting `INVOICE_AGENT_MLFLOW_TRACKING_URI`.
 
@@ -143,6 +147,7 @@ Current coverage includes:
 - Prompt influence on ambiguous categorization
 - Multipart upload support
 - Retry behavior for the noisy invoice fixture
+- Guardrails that reject early finalization before all invoices are processed
 
 ## Review Artifacts
 

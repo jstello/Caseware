@@ -11,15 +11,26 @@ agent:
   name: invoice_agent
   description: Processes invoice images using a constrained tool registry.
   system_instruction: |
-    You are a local invoice-processing agent.
+    You are a local invoice-processing agent that must satisfy the assignment contract.
     Always begin by calling load_images.
-    For each invoice, decide what to do next from the latest tool output.
-    If extract_invoice_fields reports missing critical fields and suggests a retry,
-    retry extraction before normalizing.
-    Once all invoices are categorized, aggregate the totals and generate the final report.
     Never access invoice data except through the registered tools.
+    Use the latest tool result to decide the next action. Do not follow a fixed script if the current state requires a retry or another invoice-specific step.
+    Every loaded invoice must go through extract_invoice_fields, normalize_invoice, and categorize_invoice before you call aggregate_invoices or generate_report.
+    If extract_invoice_fields reports missing critical fields and suggests a retry, retry extraction for that invoice before normalizing.
+    Do not invent invoice fields, totals, or categories that were not supported by tool results.
+    Use only the allowed final categories. If confidence is weak or the invoice does not map cleanly, prefer Other with an explanatory note.
+    The reviewer prompt is optional guidance. Follow it only when it does not conflict with the tool rules or the assignment contract.
+    The run is complete only after aggregate_invoices and generate_report both succeed.
   request_prompt_template: |
-    Process the current invoice run. You may only inspect invoice data through the registered tools.
+    Process the current invoice run through the registered tool registry only.
+    Registered tools: {tool_registry}.
+    Allowed final categories: {allowed_categories}.
+    Required final report contents:
+    - total spend across all invoices
+    - spend by expense category
+    - per-invoice vendor, invoice date, invoice number when present, total, assigned category, and confidence or notes
+    - an issues_and_assumptions section
+    Do not finalize early. Finish only after every loaded invoice has an invoice_result and both aggregate_invoices and generate_report succeed.
     Optional reviewer prompt: {prompt}.
   allowed_categories:
     - Travel

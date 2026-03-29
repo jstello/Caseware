@@ -172,6 +172,8 @@ class InvoiceToolRegistry:
             "needs_retry": needs_retry,
             "retry_focus_hint": retry_focus_hint,
         }
+        self._clear_invoice_outputs(invoice, clear_normalized=True)
+        self._clear_run_outputs(tool_context)
         invoice["extracted"] = result
         invoice["issues"] = _dedupe(invoice.get("issues", []) + result["notes"])
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
@@ -222,6 +224,8 @@ class InvoiceToolRegistry:
             "notes": _dedupe(notes),
             "assumptions": _dedupe(assumptions),
         }
+        self._clear_invoice_outputs(invoice, clear_normalized=False)
+        self._clear_run_outputs(tool_context)
         invoice["normalized"] = result
         invoice["issues"] = _dedupe(invoice.get("issues", []) + result["notes"] + result["assumptions"])
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
@@ -284,6 +288,7 @@ class InvoiceToolRegistry:
             "notes": _dedupe(notes),
         }
         invoice["invoice_result"] = invoice_result
+        self._clear_run_outputs(tool_context)
         invoice["issues"] = _dedupe(invoice.get("issues", []) + invoice_result["notes"])
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
         return {
@@ -296,6 +301,7 @@ class InvoiceToolRegistry:
     def aggregate_invoices(self, tool_context: ToolContext) -> dict[str, Any]:
         """Aggregate the processed invoices into run-level totals and category totals."""
 
+        self._ensure_all_invoices_categorized(tool_context)
         invoice_results = self._ordered_invoice_results(tool_context)
         totals: defaultdict[str, Decimal] = defaultdict(lambda: Decimal("0.00"))
         grand_total = Decimal("0.00")
@@ -320,6 +326,7 @@ class InvoiceToolRegistry:
     def generate_report(self, tool_context: ToolContext) -> dict[str, Any]:
         """Generate the final structured run output from the aggregated results and the per-invoice records."""
 
+        self._ensure_all_invoices_categorized(tool_context)
         summary = tool_context.state.get("run_summary")
         if not summary:
             summary = self.aggregate_invoices(tool_context)
@@ -360,3 +367,41 @@ class InvoiceToolRegistry:
             for issue in _ensure_list(invoice.get("issues")):
                 issues.append(f"{invoice.get('filename', invoice_id)}: {issue}")
         return _dedupe(issues)
+
+    def _ensure_all_invoices_categorized(self, tool_context: ToolContext) -> None:
+        if "invoice_refs" not in tool_context.state:
+            raise ValueError(
+                "The planner must call load_images before aggregate_invoices or generate_report."
+            )
+
+        pending_invoice_ids = self._pending_invoice_ids(tool_context)
+        if pending_invoice_ids:
+            pending_list = ", ".join(pending_invoice_ids)
+            raise ValueError(
+                "The planner must finish extract, normalize, and categorize for every loaded invoice "
+                f"before aggregate_invoices or generate_report. Pending invoice_ids: {pending_list}."
+            )
+
+    def _pending_invoice_ids(self, tool_context: ToolContext) -> list[str]:
+        working_invoices = tool_context.state.get("working_invoices") or {}
+        pending: list[str] = []
+        for invoice_id in tool_context.state.get("invoice_order") or []:
+            invoice = working_invoices.get(invoice_id, {})
+            if not invoice.get("invoice_result"):
+                pending.append(invoice_id)
+        return pending
+
+    def _clear_invoice_outputs(
+        self,
+        invoice: dict[str, Any],
+        *,
+        clear_normalized: bool,
+    ) -> None:
+        if clear_normalized:
+            invoice.pop("normalized", None)
+        invoice.pop("categorized", None)
+        invoice.pop("invoice_result", None)
+
+    def _clear_run_outputs(self, tool_context: ToolContext) -> None:
+        tool_context.state["run_summary"] = None
+        tool_context.state["final_report"] = None

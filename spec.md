@@ -141,7 +141,9 @@ Non-secret runtime behavior is defined in [`config/invoice_agent.yaml`](/Users/j
 - The stream always begins with `run_started`.
 - `progress`, `tool_call`, `tool_result`, and `invoice_result` may repeat.
 - `invoice_result` is emitted immediately after a successful `categorize_invoice` result.
+- `aggregate_invoices` and `generate_report` are valid only after `load_images` has run and every loaded invoice has reached `invoice_result`.
 - `final_result` is emitted once, after the agent loop finishes and the report has been saved.
+- In live mode, missing provider configuration emits `error` after `run_started` without attempting model execution.
 - `error` terminates the run without `final_result`.
 
 ## Observability Outputs
@@ -151,6 +153,7 @@ Each run produces:
 - JSONL execution trace at `trace_path`
 - JSONL SSE log at `sse_path`
 - Final structured report at `report_path`
+- Prompt artifacts under `run_dir/prompts/`, including `system_instruction.txt` and `request_prompt.txt`
 - An MLflow run in the local SQLite-backed experiment store containing flattened config params, tags, summary metrics, the effective config artifact, the request prompt artifact when present, and the saved run artifacts
 
 ## Tool Registry
@@ -251,6 +254,7 @@ The agent is limited to six tools and may only access invoice data through them.
 ### `aggregate_invoices()`
 
 - Purpose: compute run-level totals
+- Guardrail: fails if `load_images()` has not run or if any loaded invoice is still missing `invoice_result`
 - Output:
 
 ```json
@@ -267,6 +271,7 @@ The agent is limited to six tools and may only access invoice data through them.
 ### `generate_report()`
 
 - Purpose: build the final submission payload
+- Guardrail: fails if `load_images()` has not run or if any loaded invoice is still missing `invoice_result`
 - Output: same `report` object described in `final_result`
 
 ## Final Output Schema
