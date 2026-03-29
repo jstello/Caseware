@@ -144,7 +144,7 @@ def _prepare_single_invoice_folder(tmp_path: Path, filename: str) -> Path:
     return tmp_path
 
 
-def test_live_extraction_adapter_uses_multimodal_input_and_structured_schema() -> None:
+def test_live_extraction_adapter_uses_svg_text_fallback_and_structured_schema() -> None:
     fixture_path = FIXTURE_DIR / "acme-air-travel-001.svg"
     client = _RecordingClient(
         [
@@ -181,11 +181,58 @@ def test_live_extraction_adapter_uses_multimodal_input_and_structured_schema() -
     assert result.vendor == "Acme Air"
     call = client.models.calls[0]
     assert call["model"] == "gemini-2.5-flash"
-    assert call["contents"][0].inline_data.mime_type == "image/svg+xml"
-    assert "Focus hint: vendor, total." in call["contents"][1]
+    assert "Focus hint: vendor, total." in call["contents"][0]
+    assert "The invoice file is SVG markup." in call["contents"][1]
+    assert "<svg" in call["contents"][1]
     assert call["config"]["response_mime_type"] == "application/json"
     assert call["config"]["thinking_config"].include_thoughts is True
     assert "extraction_confidence" in call["config"]["response_json_schema"]["properties"]
+
+
+def test_live_extraction_adapter_uses_multimodal_input_for_raster_images(tmp_path: Path) -> None:
+    fixture_path = tmp_path / "invoice.png"
+    fixture_path.write_bytes(
+        bytes.fromhex(
+            "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C489"
+            "0000000D49444154789C6360000002000154A24F5D0000000049454E44AE426082"
+        )
+    )
+    client = _RecordingClient(
+        [
+            _FakeResponse(
+                json.dumps(
+                    {
+                        "vendor": "Acme Air",
+                        "invoice_date": "2026-02-15",
+                        "invoice_number": "AA-1007",
+                        "total": 642.1,
+                        "currency": "USD",
+                        "raw_category_hint": "airfare",
+                        "extraction_confidence": 0.97,
+                        "notes": ["The airline invoice is legible."],
+                    }
+                )
+            )
+        ]
+    )
+    adapter = GeminiInvoiceToolAdapter(
+        client=client,
+        model="gemini-2.5-flash",
+        extraction_prompt_template="Focus hint: {focus_hint}. Reviewer prompt: {reviewer_prompt}. File name: {filename}.",
+        categorization_prompt_template="unused",
+        allowed_categories=["Travel", "Other"],
+    )
+
+    adapter.extract_invoice_fields(
+        invoice_path=fixture_path,
+        reviewer_prompt="Use conservative categorization.",
+        focus_hint="vendor, total",
+    )
+
+    call = client.models.calls[0]
+    assert call["contents"][0].inline_data.mime_type == "image/png"
+    assert bytes(call["contents"][0].inline_data.data).startswith(b"\x89PNG\r\n\x1a\n")
+    assert "Focus hint: vendor, total." in call["contents"][1]
 
 
 def test_live_categorization_adapter_uses_allowed_categories_and_structured_schema() -> None:

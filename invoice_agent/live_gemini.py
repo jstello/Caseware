@@ -22,7 +22,6 @@ IMAGE_MIME_TYPES = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
-    ".svg": "image/svg+xml",
     ".webp": "image/webp",
 }
 
@@ -48,6 +47,26 @@ def _guess_mime_type(path: Path) -> str:
     if suffix not in IMAGE_MIME_TYPES:
         raise ValueError(f"Unsupported invoice image type for live extraction: {path.suffix}")
     return IMAGE_MIME_TYPES[suffix]
+
+
+def _build_extraction_contents(invoice_path: Path, prompt: str) -> list[Any]:
+    if invoice_path.suffix.lower() == ".svg":
+        svg_source = invoice_path.read_text(encoding="utf-8", errors="replace")
+        return [
+            prompt,
+            (
+                "The invoice file is SVG markup. Gemini does not accept image/svg+xml directly, "
+                "so parse this SVG source as the invoice document.\n"
+                f"```svg\n{svg_source}\n```"
+            ),
+        ]
+    return [
+        types.Part.from_bytes(
+            data=invoice_path.read_bytes(),
+            mime_type=_guess_mime_type(invoice_path),
+        ),
+        prompt,
+    ]
 
 
 def _coerce_float(value: float | None, *, default: float) -> float:
@@ -98,13 +117,7 @@ class GeminiInvoiceToolAdapter:
         )
         response = self.client.models.generate_content(
             model=self.model,
-            contents=[
-                types.Part.from_bytes(
-                    data=invoice_path.read_bytes(),
-                    mime_type=_guess_mime_type(invoice_path),
-                ),
-                prompt,
-            ],
+            contents=_build_extraction_contents(invoice_path, prompt),
             config={
                 "temperature": 0.0,
                 "thinking_config": types.ThinkingConfig(include_thoughts=True),

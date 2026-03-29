@@ -62,13 +62,20 @@ uv run adk web
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000), choose `invoice_agent`, and start a session.
 
+- The checked-in config currently defaults to the live planner, so the UI will call Gemini unless you override it.
 - If your message includes an absolute local folder path, `load_images` will use that folder.
-- If you do not provide a folder path, ADK Web falls back to the bundled fixture folder at [`fixtures/invoices`](/Users/juan_tello/Documents/Caseware/Caseware-adk-web/fixtures/invoices) so the mock planner is testable out of the box.
+- If you want the deterministic fixture-backed UI flow instead, run `INVOICE_AGENT_PLANNER_MODE=mock uv run adk web`. With no folder path, ADK Web falls back to the bundled fixture folder at [`fixtures/invoices`](/Users/juan_tello/Documents/Caseware/Caseware/fixtures/invoices).
 - `adk` does not need to be installed globally, `uv run adk web` is enough.
 
 ## Mock Mode
 
 Mock mode is the intended development and test path.
+
+Override into mock mode explicitly when you want deterministic local runs:
+
+```bash
+INVOICE_AGENT_PLANNER_MODE=mock uv run uvicorn invoice_agent.app:app --reload
+```
 
 - It uses the real FastAPI endpoint, ADK runner, session state, and SSE mapping.
 - It keeps invoice access constrained to the registered tools.
@@ -77,9 +84,9 @@ Mock mode is the intended development and test path.
 - The runtime blocks premature `aggregate_invoices` or `generate_report` calls until every loaded invoice has been categorized.
 - In live mode, SDK-exposed Gemini thought summaries are preserved in internal trace artifacts and tool-response history so later planner turns can see earlier tool reasoning without exposing those summaries on the public SSE stream.
 
-## Optional Live Planner Mode
+## Live Planner Mode
 
-The planner can be switched to Gemini through ADK without reading any `.env` file:
+The checked-in config now defaults to Gemini through ADK. If you need to set the runtime explicitly, you can still do it without reading any `.env` file:
 
 ```bash
 export INVOICE_AGENT_PLANNER_MODE=live
@@ -95,7 +102,7 @@ If `INVOICE_AGENT_PLANNER_MODE=live` is set without either `GOOGLE_API_KEY` or a
 In live mode:
 
 - The planner stays on ADK `Gemini`
-- `extract_invoice_fields` uses a multimodal Gemini API call with schema-constrained JSON output
+- `extract_invoice_fields` uses a multimodal Gemini API call for raster images, and falls back to parsing raw SVG source for `.svg` invoices because Gemini rejects `image/svg+xml`
 - `categorize_invoice` uses a text-only Gemini API call with schema-constrained JSON output
 - Final categories are still clamped in code to the assignment taxonomy so unsupported model labels gracefully fall back to `Other`
 
@@ -104,6 +111,7 @@ In live mode:
 MLflow tracing is enabled by default and writes to a local SQLite-backed store under [`artifacts/mlflow`](/Users/juan_tello/Documents/Caseware/Caseware/artifacts/mlflow).
 
 - Each run logs flattened config params, tags, metrics, the effective YAML config artifact, the request prompt artifact, the JSONL trace, the SSE log, and the final report.
+- ADK Web invocations now emit the same MLflow run and local trace artifacts as the custom `/runs/stream` endpoint.
 - The saved request prompt artifact captures the effective planner prompt the model saw after template expansion, not just the optional reviewer hint.
 - The run directory also keeps `prompts/system_instruction.txt` and `prompts/request_prompt.txt` so prompt review still works when MLflow is disabled.
 - Tool execution is traced with lightweight decorator-based MLflow spans while the existing JSONL trace remains the reviewer-friendly source of truth.

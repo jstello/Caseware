@@ -338,6 +338,7 @@ def test_mlflow_groups_invoice_execution_under_one_nested_trace(tmp_path: Path, 
         update={
             "runtime": base_config.runtime.model_copy(
                 update={
+                    "planner_mode": "mock",
                     "traces_dir": tmp_path / "runs",
                     "mlflow_tracking_dir": tmp_path / "mlflow",
                     "fixture_manifest_path": FIXTURE_DIR / "manifest.json",

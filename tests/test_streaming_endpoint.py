@@ -24,6 +24,11 @@ from invoice_agent.settings import get_settings
 FIXTURE_DIR = Path("/Users/juan_tello/Documents/Caseware/Caseware/fixtures/invoices")
 
 
+def _force_mock_mode(monkeypatch) -> None:
+    monkeypatch.setenv("INVOICE_AGENT_PLANNER_MODE", "mock")
+    get_settings.cache_clear()
+
+
 def _planner_response(
     *,
     text: str,
@@ -253,7 +258,8 @@ def _parse_sse_payload(response_text: str) -> list[dict]:
     return events
 
 
-def test_folder_path_streams_required_events_and_final_report() -> None:
+def test_folder_path_streams_required_events_and_final_report(monkeypatch) -> None:
+    _force_mock_mode(monkeypatch)
     client = TestClient(app)
 
     response = client.post(
@@ -317,7 +323,8 @@ def test_folder_path_streams_required_events_and_final_report() -> None:
     )
 
 
-def test_multipart_upload_supports_invoice_images() -> None:
+def test_multipart_upload_supports_invoice_images(monkeypatch) -> None:
+    _force_mock_mode(monkeypatch)
     client = TestClient(app)
 
     acme = FIXTURE_DIR / "acme-air-travel-001.svg"
@@ -351,6 +358,8 @@ def test_multipart_upload_supports_invoice_images() -> None:
 def test_stream_emits_error_when_planner_tries_to_finalize_before_all_invoices_are_processed(
     monkeypatch,
 ) -> None:
+    _force_mock_mode(monkeypatch)
+
     def build_unsafe_agent(settings, invoice_tools):
         return LlmAgent(
             name=settings.agent.name,
