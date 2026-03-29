@@ -31,7 +31,7 @@ Supported image suffixes in the current implementation: `.png`, `.jpg`, `.jpeg`,
 Non-secret runtime behavior is defined in [`config/invoice_agent.yaml`](/Users/juan_tello/Documents/Caseware/Caseware/config/invoice_agent.yaml).
 
 - `runtime`: app name, planner mode, live model, extraction retry cap, local trace directory, and local MLflow storage path
-- `agent`: root instruction, request prompt template, allowed categories, and tool-to-stage mapping
+- `agent`: root instruction, request prompt template, live extraction prompt template, live categorization prompt template, allowed categories, and tool-to-stage mapping
 - `tracing`: MLflow experiment settings and artifact logging options
 
 ## SSE Event Schema
@@ -46,7 +46,16 @@ Non-secret runtime behavior is defined in [`config/invoice_agent.yaml`](/Users/j
     "source_type": "folder|upload_dir",
     "path": "string"
   },
-  "prompt": "string|null"
+  "prompt": "string|null",
+  "version_tracking": {
+    "model_id": "string|null",
+    "model_name": "string|null",
+    "git_branch": "string|null",
+    "git_commit": "string|null",
+    "git_dirty": true,
+    "git_repo_url": "string|null",
+    "search_filter_string": "string|null"
+  }
 }
 ```
 
@@ -122,7 +131,16 @@ Non-secret runtime behavior is defined in [`config/invoice_agent.yaml`](/Users/j
   },
   "trace_path": "string",
   "sse_path": "string",
-  "report_path": "string"
+  "report_path": "string",
+  "version_tracking": {
+    "model_id": "string|null",
+    "model_name": "string|null",
+    "git_branch": "string|null",
+    "git_commit": "string|null",
+    "git_dirty": true,
+    "git_repo_url": "string|null",
+    "search_filter_string": "string|null"
+  }
 }
 ```
 
@@ -143,6 +161,7 @@ Non-secret runtime behavior is defined in [`config/invoice_agent.yaml`](/Users/j
 - `invoice_result` is emitted immediately after a successful `categorize_invoice` result.
 - `aggregate_invoices` and `generate_report` are valid only after `load_images` has run and every loaded invoice has reached `invoice_result`.
 - `final_result` is emitted once, after the agent loop finishes and the report has been saved.
+- `run_started` and `final_result` may include `version_tracking` metadata when Git-linked MLflow versioning is available.
 - In live mode, missing provider configuration emits `error` after `run_started` without attempting model execution.
 - `error` terminates the run without `final_result`.
 
@@ -153,6 +172,7 @@ Each run produces:
 - JSONL execution trace at `trace_path`
 - JSONL SSE log at `sse_path`
 - Final structured report at `report_path`
+- Version metadata attached to `run_started` / `final_result` when available
 - Prompt artifacts under `run_dir/prompts/`, including `system_instruction.txt` and `request_prompt.txt`
 - An MLflow run in the local SQLite-backed experiment store containing flattened config params, tags, summary metrics, the effective config artifact, the request prompt artifact when present, and the saved run artifacts
 
@@ -185,6 +205,7 @@ The agent is limited to six tools and may only access invoice data through them.
 
 - Purpose: extract raw invoice fields for one invoice
 - Dynamic behavior: may be retried with a focused hint when critical fields are missing
+- Live mode behavior: uses a multimodal Gemini API call with schema-constrained JSON, then computes retry-control fields locally
 - Output:
 
 ```json
@@ -226,6 +247,7 @@ The agent is limited to six tools and may only access invoice data through them.
 ### `categorize_invoice(invoice_id)`
 
 - Purpose: map the normalized invoice to one allowed category
+- Live mode behavior: uses a text-only Gemini API call with schema-constrained JSON, then clamps unsupported categories to `Other`
 - Output:
 
 ```json

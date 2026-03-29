@@ -15,10 +15,54 @@ class FakeMlflowConfig:
         self.calls.append(("enable_async_logging",))
 
 
+class FakeGitInfo:
+    def __init__(self) -> None:
+        self.branch = "main"
+        self.commit = "abc123def456"
+        self.dirty = True
+        self.repo_url = "https://example.com/caseware.git"
+
+    def to_search_filter_string(self) -> str:
+        return (
+            "tags.`mlflow.source.git.branch` = 'main' AND "
+            "tags.`mlflow.source.git.commit` = 'abc123def456'"
+        )
+
+
+class FakeGitActiveModel:
+    def __init__(self) -> None:
+        self.model_id = "m-test-123"
+        self.name = "invoice-agent-main"
+
+
+class FakeGitContext:
+    def __init__(self) -> None:
+        self.info = FakeGitInfo()
+        self.active_model = FakeGitActiveModel()
+
+
+class FakeMlflowGenAI:
+    def __init__(self, calls: list[tuple], mlflow: "FakeMlflow") -> None:
+        self.calls = calls
+        self.mlflow = mlflow
+        self.context = FakeGitContext()
+
+    def enable_git_model_versioning(self):
+        self.calls.append(("enable_git_model_versioning",))
+        self.mlflow._active_model_id = self.context.active_model.model_id
+        return self.context
+
+    def disable_git_model_versioning(self) -> None:
+        self.calls.append(("disable_git_model_versioning",))
+        self.mlflow._active_model_id = None
+
+
 class FakeMlflow:
     def __init__(self) -> None:
         self.calls: list[tuple] = []
         self.config = FakeMlflowConfig(self.calls)
+        self._active_model_id: str | None = None
+        self.genai = FakeMlflowGenAI(self.calls, self)
 
     def set_tracking_uri(self, uri: str) -> None:
         self.calls.append(("set_tracking_uri", uri))
@@ -43,6 +87,9 @@ class FakeMlflow:
 
     def end_run(self, status: str | None = None) -> None:
         self.calls.append(("end_run", status))
+
+    def get_active_model_id(self) -> str | None:
+        return self._active_model_id
 
 
 def test_settings_merge_yaml_and_explicit_overrides(tmp_path: Path) -> None:
@@ -126,3 +173,71 @@ def test_mlflow_run_recorder_logs_config_prompt_and_outputs(monkeypatch, tmp_pat
     assert ("log_metric", "invoice_count", 2.0) in fake_mlflow.calls
     assert ("log_metric", "total_spend", 42.5) in fake_mlflow.calls
     assert ("end_run", "FINISHED") in fake_mlflow.calls
+
+
+def test_mlflow_run_recorder_enables_git_version_tracking_before_run_start(
+    monkeypatch, tmp_path: Path
+) -> None:
+    fake_mlflow = FakeMlflow()
+    monkeypatch.setattr("invoice_agent.trace.mlflow", fake_mlflow)
+
+    config = load_invoice_agent_config(ROOT_DIR / "config" / "invoice_agent.yaml").model_copy(
+        update={
+            "runtime": load_invoice_agent_config(
+                ROOT_DIR / "config" / "invoice_agent.yaml"
+            ).runtime.model_copy(
+                update={
+                    "traces_dir": tmp_path / "runs",
+                    "mlflow_tracking_dir": tmp_path / "mlflow",
+                }
+            ),
+            "tracing": load_invoice_agent_config(
+                ROOT_DIR / "config" / "invoice_agent.yaml"
+            ).tracing.model_copy(update={"tracking_uri": "http://mlflow.test"}),
+        }
+    )
+    run_dir = tmp_path / "runs" / "run-123"
+    trace_writer = TraceWriter(run_dir)
+    trace_writer.write_trace(kind="run_started", payload={"run_id": "run-123"})
+    trace_writer.write_sse(event="run_started", data={"run_id": "run-123"})
+    trace_writer.write_report(
+        {
+            "run_summary": {"invoice_count": 2, "total_spend": 42.5},
+            "invoices": [],
+            "issues_and_assumptions": [],
+        }
+    )
+
+    recorder = MlflowRunRecorder(
+        run_id="run-123",
+        run_dir=run_dir,
+        config_path=ROOT_DIR / "config" / "invoice_agent.yaml",
+        config=config,
+        prompt="Use conservative categorization.",
+    )
+    recorder.start()
+
+    assert recorder.version_tracking is not None
+    assert recorder.version_tracking.model_id == "m-test-123"
+    assert recorder.version_tracking.git_branch == "main"
+    assert recorder.version_tracking.git_commit == "abc123def456"
+    assert recorder.version_tracking.git_dirty is True
+
+    enable_index = fake_mlflow.calls.index(("enable_git_model_versioning",))
+    start_index = fake_mlflow.calls.index(("start_run", "run-123"))
+    assert enable_index < start_index
+    assert ("set_tag", "mlflow.active_model_id", "m-test-123") in fake_mlflow.calls
+    assert ("set_tag", "mlflow.source.git.branch", "main") in fake_mlflow.calls
+    assert ("set_tag", "mlflow.source.git.commit", "abc123def456") in fake_mlflow.calls
+    assert ("set_tag", "mlflow.source.git.dirty", "true") in fake_mlflow.calls
+
+    recorder.finalize(
+        trace_writer,
+        {
+            "run_summary": {"invoice_count": 2, "total_spend": 42.5},
+            "invoices": [],
+            "issues_and_assumptions": [],
+        },
+    )
+
+    assert ("disable_git_model_versioning",) in fake_mlflow.calls

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import inspect
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import wraps
 from datetime import UTC, datetime
 from pathlib import Path
@@ -124,6 +124,29 @@ class _ManagedSpan:
         self.context_manager.__exit__(None, None, None)
 
 
+@dataclass(frozen=True)
+class VersionTrackingMetadata:
+    model_id: str
+    model_name: str | None
+    git_branch: str | None
+    git_commit: str | None
+    git_dirty: bool | None
+    git_repo_url: str | None
+    search_filter_string: str | None
+    git_tags: dict[str, str] = field(default_factory=dict)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "model_id": self.model_id,
+            "model_name": self.model_name,
+            "git_branch": self.git_branch,
+            "git_commit": self.git_commit,
+            "git_dirty": self.git_dirty,
+            "git_repo_url": self.git_repo_url,
+            "search_filter_string": self.search_filter_string,
+        }
+
+
 class MlflowTraceSession:
     """Maintains one nested MLflow trace for the full run lifecycle."""
 
@@ -134,11 +157,29 @@ class MlflowTraceSession:
         self._invoice_spans: dict[str, _ManagedSpan] = {}
         self._decision_spans: dict[str, _ManagedSpan] = {}
 
-    def start(self, run_started: dict[str, Any]) -> None:
+    def start(
+        self,
+        run_started: dict[str, Any],
+        *,
+        version_tracking: dict[str, Any] | None = None,
+    ) -> None:
         if not self.enabled:
             return
 
         try:
+            version_attributes = {}
+            if version_tracking:
+                dirty_value = version_tracking.get("git_dirty")
+                version_attributes = {
+                    "model.id": str(version_tracking.get("model_id") or ""),
+                    "model.name": str(version_tracking.get("model_name") or ""),
+                    "git.branch": str(version_tracking.get("git_branch") or ""),
+                    "git.commit": str(version_tracking.get("git_commit") or ""),
+                    "git.dirty": ""
+                    if dirty_value is None
+                    else str(dirty_value).lower(),
+                }
+
             root = self._open_span(
                 name=f"invoice_agent_run:{self.run_id}",
                 span_type="AGENT",
@@ -150,9 +191,15 @@ class MlflowTraceSession:
                     ),
                     "input.path": str((run_started.get("input_source") or {}).get("path")),
                     "input.has_prompt": run_started.get("prompt") not in (None, ""),
+                    **version_attributes,
                 },
             )
-            root.span.set_inputs(_sanitize_trace_input(run_started))
+            root.span.set_inputs(
+                {
+                    "run_started": _sanitize_trace_input(run_started),
+                    "version_tracking": _sanitize_trace_input(version_tracking),
+                }
+            )
             self._root_span = root
         except Exception:
             self._disable()
@@ -403,6 +450,8 @@ class MlflowRunRecorder:
         self.prompt = prompt
         self.enabled = mlflow is not None and config.tracing.enabled
         self._run_active = False
+        self.version_tracking: VersionTrackingMetadata | None = None
+        self._git_versioning_enabled = False
 
     def start(self) -> None:
         if not self.enabled:
@@ -416,6 +465,7 @@ class MlflowRunRecorder:
             else:
                 experiment_id = self._ensure_local_experiment(tracking_uri)
                 mlflow.set_experiment(experiment_id=experiment_id)
+            self._bootstrap_git_version_tracking()
             if (
                 self.config.tracing.enable_async_logging
                 and hasattr(mlflow, "config")
@@ -425,6 +475,7 @@ class MlflowRunRecorder:
             mlflow.start_run(run_name=self.run_id)
             self._run_active = True
 
+            self._log_version_tracking_tags()
             for key, value in {
                 "run_id": self.run_id,
                 "app": self.config.runtime.app_name,
@@ -454,11 +505,13 @@ class MlflowRunRecorder:
                 for artifact in sorted(prompt_dir.glob("*.txt")):
                     mlflow.log_artifact(str(artifact), artifact_path="prompts")
         except Exception:  # pragma: no cover - tracing must not block the run
+            self._disable_git_version_tracking()
             self.enabled = False
             self._run_active = False
 
     def finalize(self, trace_writer: TraceWriter, report: dict[str, Any] | None) -> None:
         if not self.enabled:
+            self._disable_git_version_tracking()
             return
 
         try:
@@ -483,9 +536,12 @@ class MlflowRunRecorder:
         except Exception:  # pragma: no cover - tracing must not block the run
             self.enabled = False
             self._run_active = False
+        finally:
+            self._disable_git_version_tracking()
 
     def finalize_error(self, trace_writer: TraceWriter, error: dict[str, Any]) -> None:
         if not self.enabled:
+            self._disable_git_version_tracking()
             return
 
         try:
@@ -506,6 +562,82 @@ class MlflowRunRecorder:
         except Exception:  # pragma: no cover - tracing must not block the run
             self.enabled = False
             self._run_active = False
+        finally:
+            self._disable_git_version_tracking()
+
+    def version_tracking_payload(self) -> dict[str, Any] | None:
+        if self.version_tracking is None:
+            return None
+        return self.version_tracking.to_payload()
+
+    def _bootstrap_git_version_tracking(self) -> None:
+        if mlflow is None or not hasattr(mlflow, "genai"):
+            return
+
+        try:
+            context = mlflow.genai.enable_git_model_versioning()
+            info = getattr(context, "info", None)
+            active_model = getattr(context, "active_model", None)
+            if info is None or active_model is None:
+                return
+
+            model_id = getattr(active_model, "model_id", None) or mlflow.get_active_model_id()
+            if model_id is None:
+                return
+
+            self.version_tracking = VersionTrackingMetadata(
+                model_id=str(model_id),
+                model_name=getattr(active_model, "name", None),
+                git_branch=getattr(info, "branch", None),
+                git_commit=getattr(info, "commit", None),
+                git_dirty=getattr(info, "dirty", None),
+                git_repo_url=getattr(info, "repo_url", None),
+                search_filter_string=getattr(info, "to_search_filter_string", lambda: None)(),
+                git_tags=self._build_git_tags(info),
+            )
+            self._git_versioning_enabled = True
+        except Exception:  # pragma: no cover - version tracking must not block the run
+            self.version_tracking = None
+            self._git_versioning_enabled = False
+
+    def _build_git_tags(self, info: Any) -> dict[str, str]:
+        tags: dict[str, str] = {}
+        branch = getattr(info, "branch", None)
+        commit = getattr(info, "commit", None)
+        dirty = getattr(info, "dirty", None)
+        repo_url = getattr(info, "repo_url", None)
+
+        if branch is not None:
+            tags["mlflow.source.git.branch"] = str(branch)
+        if commit is not None:
+            tags["mlflow.source.git.commit"] = str(commit)
+        if dirty is not None:
+            tags["mlflow.source.git.dirty"] = "true" if dirty else "false"
+        if repo_url is not None:
+            tags["mlflow.source.git.repoURL"] = str(repo_url)
+        return tags
+
+    def _log_version_tracking_tags(self) -> None:
+        if self.version_tracking is None:
+            return
+
+        for key, value in self.version_tracking.git_tags.items():
+            mlflow.set_tag(key, value)
+        mlflow.set_tag("mlflow.active_model_id", self.version_tracking.model_id)
+        if self.version_tracking.model_name:
+            mlflow.set_tag("mlflow.active_model_name", self.version_tracking.model_name)
+        mlflow.set_tag("mlflow.version_tracking.enabled", "true")
+
+    def _disable_git_version_tracking(self) -> None:
+        if not self._git_versioning_enabled or mlflow is None or not hasattr(mlflow, "genai"):
+            return
+
+        try:
+            mlflow.genai.disable_git_model_versioning()
+        except Exception:  # pragma: no cover - cleanup should never block tracing
+            pass
+        finally:
+            self._git_versioning_enabled = False
 
     def _default_tracking_uri(self) -> str:
         database_path = (self.config.runtime.mlflow_tracking_dir / "mlflow.db").resolve()

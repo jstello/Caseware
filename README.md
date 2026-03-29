@@ -7,6 +7,7 @@ This repository contains a local invoice-processing agent built for the Caseware
 - Exposes `POST /runs/stream`
 - Accepts either a local folder path or multipart invoice images
 - Runs a planner loop through a constrained six-tool registry
+- Uses Gemini-backed extraction and categorization in live mode while keeping normalization, aggregation, and reporting deterministic
 - Streams `run_started`, `progress`, `tool_call`, `tool_result`, `invoice_result`, `final_result`, and `error`
 - Produces JSONL traces plus a saved final report for every run
 - Logs MLflow experiments, run params, metrics, and trace artifacts for each run
@@ -29,7 +30,7 @@ uv sync --group dev
 Non-secret runtime behavior lives in [`config/invoice_agent.yaml`](/Users/juan_tello/Documents/Caseware/Caseware/config/invoice_agent.yaml).
 
 - `runtime`: app name, planner mode, extraction retry limit, trace directory, and local MLflow storage path
-- `agent`: root agent name, description, system instruction, request prompt template, allowed categories, and tool stage labels
+- `agent`: root agent name, description, planner prompt, live extraction prompt, live categorization prompt, allowed categories, and tool stage labels
 - `tracing`: MLflow enablement, experiment name, tracking URI override, and artifact logging options
 
 Environment variables can still override selected values without reading any `.env` file:
@@ -75,6 +76,13 @@ uv run uvicorn invoice_agent.app:app --reload
 The repository intentionally does not read `.env` or `.env.*` files.
 If `INVOICE_AGENT_PLANNER_MODE=live` is set without either `GOOGLE_API_KEY` or a valid Vertex setup (`GOOGLE_GENAI_USE_VERTEXAI=true`, `GOOGLE_CLOUD_PROJECT`, and `GOOGLE_CLOUD_LOCATION`), the stream emits `run_started` followed by a `LiveConfigurationError`.
 
+In live mode:
+
+- The planner stays on ADK `Gemini`
+- `extract_invoice_fields` uses a multimodal Gemini API call with schema-constrained JSON output
+- `categorize_invoice` uses a text-only Gemini API call with schema-constrained JSON output
+- Final categories are still clamped in code to the assignment taxonomy so unsupported model labels gracefully fall back to `Other`
+
 ## MLflow Tracing
 
 MLflow tracing is enabled by default and writes to a local SQLite-backed store under [`artifacts/mlflow`](/Users/juan_tello/Documents/Caseware/Caseware/artifacts/mlflow).
@@ -84,6 +92,25 @@ MLflow tracing is enabled by default and writes to a local SQLite-backed store u
 - The run directory also keeps `prompts/system_instruction.txt` and `prompts/request_prompt.txt` so prompt review still works when MLflow is disabled.
 - Tool execution is traced with lightweight decorator-based MLflow spans while the existing JSONL trace remains the reviewer-friendly source of truth.
 - You can point to another MLflow backend by setting `INVOICE_AGENT_MLFLOW_TRACKING_URI`.
+
+### Version Tracking
+
+Git-linked version tracking is enabled before each run starts so the active `LoggedModel` is associated with the planner trace and the run tags.
+
+- The recorder calls `mlflow.genai.enable_git_model_versioning()` before the agent loop starts.
+- Each run logs `mlflow.active_model_id` plus the Git branch, commit, and dirty-state tags when Git metadata is available.
+- The SSE `run_started` and `final_result` payloads include the active version metadata so the stream itself is self-describing.
+- To inspect the version in the UI, open the experiment, click the Logged Model entry, and then use the Traces tab for that model.
+- To query the traces programmatically:
+
+```python
+import mlflow
+
+model_id = "<model_id from the run_started payload or MLflow run tag>"
+traces = mlflow.search_traces(model_id=model_id, return_type="list")
+```
+
+If Git metadata cannot be detected, the run still proceeds normally and version tracking is skipped gracefully.
 
 If you want to inspect the local MLflow runs in the UI:
 
@@ -148,6 +175,9 @@ Current coverage includes:
 - Multipart upload support
 - Retry behavior for the noisy invoice fixture
 - Guardrails that reject early finalization before all invoices are processed
+- Live extraction request shaping and schema parsing
+- Live categorization request shaping and category clamping
+- Deterministic live-mode runs using mocked Gemini responses
 
 ## Review Artifacts
 
@@ -158,4 +188,6 @@ Current coverage includes:
 - Sample trace: [`sample_traces/mock_folder_run/trace.jsonl`](/Users/juan_tello/Documents/Caseware/Caseware/sample_traces/mock_folder_run/trace.jsonl)
 - Sample SSE log: [`sample_traces/mock_folder_run/sse_events.json`](/Users/juan_tello/Documents/Caseware/Caseware/sample_traces/mock_folder_run/sse_events.json)
 - Sample final result: [`sample_traces/mock_folder_run/final_result.json`](/Users/juan_tello/Documents/Caseware/Caseware/sample_traces/mock_folder_run/final_result.json)
+- Simulated live trace: [`sample_traces/live_mode_simulated/trace.jsonl`](/Users/juan_tello/Documents/Caseware/Caseware/sample_traces/live_mode_simulated/trace.jsonl)
+- Simulated live final result: [`sample_traces/live_mode_simulated/final_result.json`](/Users/juan_tello/Documents/Caseware/Caseware/sample_traces/live_mode_simulated/final_result.json)
 - AI session log: [`transcripts/codex-session-2026-03-28.md`](/Users/juan_tello/Documents/Caseware/Caseware/transcripts/codex-session-2026-03-28.md)

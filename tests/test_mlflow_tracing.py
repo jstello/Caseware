@@ -42,6 +42,10 @@ agent:
     You are a local invoice-processing agent.
   request_prompt_template: |
     Optional reviewer prompt: {prompt}.
+  live_extraction_prompt_template: |
+    Extract invoice fields.
+  live_categorization_prompt_template: |
+    Categorize invoice fields.
   allowed_categories:
     - Travel
     - Other
@@ -80,6 +84,8 @@ tracing:
             description="Processes invoice images using a constrained tool registry.",
             system_instruction="You are a local invoice-processing agent.",
             request_prompt_template="Optional reviewer prompt: {prompt}.",
+            live_extraction_prompt_template="Extract invoice fields.",
+            live_categorization_prompt_template="Categorize invoice fields.",
             allowed_categories=["Travel", "Other"],
             tool_stages={
                 "load_images": "loading",
@@ -209,7 +215,25 @@ def test_mlflow_groups_invoice_execution_under_one_nested_trace(tmp_path: Path, 
     experiment = client.get_experiment_by_name("invoice-agent-nested-trace-test")
     assert experiment is not None
 
-    traces = client.search_traces(experiment_ids=[experiment.experiment_id], max_results=10)
+    runs = client.search_runs(
+        [experiment.experiment_id],
+        order_by=["attribute.start_time DESC"],
+        max_results=1,
+    )
+    assert runs
+    run = runs[0]
+    model_id = run.data.tags["mlflow.active_model_id"]
+    assert run.data.tags["mlflow.active_model_name"]
+    assert run.data.tags["mlflow.source.git.branch"]
+    assert run.data.tags["mlflow.source.git.commit"]
+    assert run.data.tags["mlflow.source.git.dirty"] in {"true", "false"}
+
+    traces = mlflow.search_traces(
+        experiment_ids=[experiment.experiment_id],
+        model_id=model_id,
+        max_results=10,
+        return_type="list",
+    )
     assert len(traces) == 1
 
     trace = mlflow.get_trace(traces[0].info.trace_id)
