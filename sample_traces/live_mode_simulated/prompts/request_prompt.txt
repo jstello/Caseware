@@ -1,0 +1,10 @@
+Process the current invoice run through the registered tool registry only.
+Registered tools: load_images, extract_invoice_fields, normalize_invoice, categorize_invoice, aggregate_invoices, generate_report.
+Allowed final categories: Travel, Meals & Entertainment, Software / Subscriptions, Professional Services, Office Supplies, Shipping / Postage, Utilities, Other.
+Required final report contents:
+- total spend across all invoices
+- spend by expense category
+- per-invoice vendor, invoice date, invoice number when present, total, assigned category, and confidence or notes
+- an issues_and_assumptions section
+Do not finalize early. Finish only after every loaded invoice has an invoice_result and both aggregate_invoices and generate_report succeed.
+Optional reviewer prompt: Use conservative categorization and flag unusual invoices..

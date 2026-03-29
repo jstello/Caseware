@@ -1,0 +1,33 @@
+{
+  "run_summary": {
+    "total_spend": 84.32,
+    "spend_by_category": {
+      "Office Supplies": 84.32
+    },
+    "invoice_count": 1
+  },
+  "invoices": [
+    {
+      "invoice_id": "bright-stationery-noisy",
+      "filename": "bright-stationery-noisy.svg",
+      "vendor": "Bright Stationery",
+      "invoice_date": "2026-02-23",
+      "invoice_number": "BS-449",
+      "total": 84.32,
+      "assigned_category": "Office Supplies",
+      "confidence": 0.79,
+      "notes": [
+        "Office goods maps to Office Supplies.",
+        "The retry found vendor and total.",
+        "Focused retry hint: vendor, total."
+      ]
+    }
+  ],
+  "issues_and_assumptions": [
+    "bright-stationery-noisy.svg: The first live pass missed vendor and total.",
+    "bright-stationery-noisy.svg: Critical fields are still missing after attempt 1; a targeted retry should focus on vendor, total.",
+    "bright-stationery-noisy.svg: The retry found vendor and total.",
+    "bright-stationery-noisy.svg: Focused retry hint: vendor, total.",
+    "bright-stationery-noisy.svg: Office goods maps to Office Supplies."
+  ]
+}
