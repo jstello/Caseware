@@ -282,11 +282,8 @@ def test_folder_path_streams_required_events_and_final_report(monkeypatch) -> No
     assert "invoice_result" in event_names
     assert "error" not in event_names
 
-    version_tracking = events[0]["data"]["version_tracking"]
-    assert version_tracking is None
 
     final_payload = events[-1]["data"]
-    assert final_payload["version_tracking"] is None
     report = FinalReport.model_validate(final_payload["report"])
     assert report.run_summary.invoice_count == 6
     assert report.run_summary.total_spend == 1508.32

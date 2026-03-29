@@ -7,12 +7,10 @@ import re
 from typing import Any
 from urllib.parse import unquote, urlparse
 
-from google.adk.agents.callback_context import CallbackContext
 from google.adk.agents.invocation_context import InvocationContext
 from google.adk.apps.app import App
 from google.adk.events.event import Event
 from google.adk.plugins.base_plugin import BasePlugin
-from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
@@ -20,7 +18,7 @@ from .agent import build_root_agent
 from .reasoning import build_reasoning_envelope, dump_reasoning_envelope
 from .schemas import ThoughtLedgerEntry
 from .settings import Settings, get_settings
-from .trace import MlflowRunRecorder, MlflowTraceSession, TraceWriter
+from .trace import MlflowRunRecorder, TraceWriter
 
 
 UPLOAD_ARTIFACT_PATTERN = re.compile(r'\[Uploaded Artifact: "(?P<name>[^"]+)"\]')
@@ -37,14 +35,19 @@ class _AdkInvocationTraceState:
     run_id: str
     trace_writer: TraceWriter
     mlflow_recorder: MlflowRunRecorder
-    mlflow_trace_session: MlflowTraceSession
     final_report: dict[str, Any] | None = None
     thought_ledger_entries: list[dict[str, Any]] = field(default_factory=list)
     finalized: bool = False
 
 
 class AdkMlflowTracingPlugin(BasePlugin):
-    """Captures ADK Web invocations into the same MLflow and local trace sinks."""
+    """Captures ADK Web invocations into local file traces and MLflow runs.
+
+    MLflow span tracing is handled automatically by ``mlflow.gemini.autolog()``,
+    so this plugin only manages: (1) upload materialization + session state sync,
+    (2) local TraceWriter file output (JSONL traces, SSE logs), and
+    (3) MlflowRunRecorder lifecycle for run/artifact management.
+    """
 
     def __init__(self, settings: Settings):
         super().__init__(name="invoice_agent_mlflow_tracing")
@@ -57,7 +60,7 @@ class AdkMlflowTracingPlugin(BasePlugin):
         invocation_context: InvocationContext,
         user_message: types.Content,
     ) -> types.Content | None:
-        uploaded_source = await self._sync_run_state_from_message(
+        await self._sync_run_state_from_message(
             invocation_context=invocation_context,
             user_message=user_message,
             phase="on_user_message",
@@ -89,11 +92,6 @@ class AdkMlflowTracingPlugin(BasePlugin):
             prompt=prompt_text,
         )
         mlflow_recorder.start()
-        version_tracking = mlflow_recorder.version_tracking_payload()
-        mlflow_trace_session = MlflowTraceSession(
-            run_id=run_id,
-            enabled=mlflow_recorder.enabled,
-        )
         input_source = invocation_context.session.state.get("input_source")
         run_started = {
             "run_id": run_id,
@@ -101,7 +99,6 @@ class AdkMlflowTracingPlugin(BasePlugin):
             "input_source": input_source if isinstance(input_source, dict) else None,
             "prompt": prompt_text,
             "session_id": invocation_context.session.id,
-            "version_tracking": version_tracking,
         }
         trace_writer.write_trace(kind="run_started", payload=run_started)
         self._append_input_source_debug(
@@ -110,12 +107,10 @@ class AdkMlflowTracingPlugin(BasePlugin):
             uploaded_source=uploaded_source,
             phase="before_run_trace",
         )
-        mlflow_trace_session.start(run_started, version_tracking=version_tracking)
         self._runs[run_id] = _AdkInvocationTraceState(
             run_id=run_id,
             trace_writer=trace_writer,
             mlflow_recorder=mlflow_recorder,
-            mlflow_trace_session=mlflow_trace_session,
         )
         return None
 
@@ -181,12 +176,6 @@ class AdkMlflowTracingPlugin(BasePlugin):
                         "planner_reasoning": planner_reasoning,
                     },
                 )
-                state.mlflow_trace_session.start_decision_span(
-                    tool_call=tool_call,
-                    planner_progress_text=progress_text,
-                    planner_reasoning=planner_reasoning,
-                    agent_name=event.author,
-                )
                 if planner_reasoning is not None:
                     state.thought_ledger_entries.append(
                         ThoughtLedgerEntry(
@@ -244,7 +233,6 @@ class AdkMlflowTracingPlugin(BasePlugin):
                             ),
                         ).model_dump(mode="json")
                     )
-                state.mlflow_trace_session.complete_decision_span(tool_result)
                 if tool_name == "categorize_invoice" and response_payload.get("invoice_result"):
                     invoice_event = {
                         "run_id": state.run_id,
@@ -252,7 +240,6 @@ class AdkMlflowTracingPlugin(BasePlugin):
                         "invoice": response_payload["invoice_result"],
                     }
                     state.trace_writer.write_trace(kind="invoice_result", payload=invoice_event)
-                    state.mlflow_trace_session.complete_invoice_span(invoice_event)
                 if tool_name == "generate_report":
                     state.final_report = response_payload
 
@@ -289,43 +276,6 @@ class AdkMlflowTracingPlugin(BasePlugin):
                 )
         return None
 
-    async def on_model_error_callback(
-        self,
-        *,
-        callback_context: CallbackContext,
-        llm_request,
-        error: Exception,
-    ):
-        self._finalize_error(
-            invocation_id=callback_context.invocation_id,
-            error_payload={
-                "run_id": callback_context.invocation_id,
-                "error_type": type(error).__name__,
-                "message": str(error),
-            },
-        )
-        return None
-
-    async def on_tool_error_callback(
-        self,
-        *,
-        tool: BaseTool,
-        tool_args: dict[str, Any],
-        tool_context: ToolContext,
-        error: Exception,
-    ):
-        self._finalize_error(
-            invocation_id=tool_context.invocation_id,
-            error_payload={
-                "run_id": tool_context.invocation_id,
-                "error_type": type(error).__name__,
-                "message": str(error),
-                "tool_name": tool.name,
-                "tool_args": dict(tool_args),
-            },
-        )
-        return None
-
     async def after_run_callback(
         self, *, invocation_context: InvocationContext
     ) -> None:
@@ -355,7 +305,6 @@ class AdkMlflowTracingPlugin(BasePlugin):
             "sse_path": str(state.trace_writer.sse_path),
         }
         state.trace_writer.write_trace(kind="final_result", payload=final_payload)
-        state.mlflow_trace_session.complete(final_payload)
         state.mlflow_recorder.finalize(state.trace_writer, state.final_report)
         state.finalized = True
         self._runs.pop(invocation_context.invocation_id, None)
@@ -367,7 +316,6 @@ class AdkMlflowTracingPlugin(BasePlugin):
         if state.thought_ledger_entries:
             state.trace_writer.write_thought_ledger(state.thought_ledger_entries)
         state.trace_writer.write_trace(kind="error", payload=error_payload)
-        state.mlflow_trace_session.fail(error_payload)
         state.mlflow_recorder.finalize_error(state.trace_writer, error_payload)
         state.finalized = True
         self._runs.pop(invocation_id, None)
