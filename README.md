@@ -32,7 +32,7 @@ Non-secret runtime behavior lives in [`config/invoice_agent.yaml`](/Users/juan_t
 
 - `runtime`: app name, planner mode, extraction retry limit, trace directory, and local MLflow storage path
 - `agent`: root agent name, description, planner prompt, live extraction prompt, live categorization prompt, allowed categories, and tool stage labels
-- `tracing`: MLflow enablement, experiment name, tracking URI override, and artifact logging options
+- `tracing`: MLflow enablement, experiment name, run name prefix, tracking URI override, and artifact logging options
 
 Environment variables can still override selected values without reading any `.env` file:
 
@@ -40,6 +40,7 @@ Environment variables can still override selected values without reading any `.e
 export INVOICE_AGENT_PLANNER_MODE=live
 export INVOICE_AGENT_LIVE_MODEL=gemini-2.5-flash
 export INVOICE_AGENT_MLFLOW_EXPERIMENT_NAME=invoice-agent-live
+export INVOICE_AGENT_MLFLOW_RUN_NAME_PREFIX=invoice-agent-live-
 ```
 
 ## Run The API
@@ -112,6 +113,7 @@ In live mode:
 MLflow tracing is enabled by default and writes to a local SQLite-backed store under [`artifacts/mlflow`](/Users/juan_tello/Documents/Caseware/Caseware/artifacts/mlflow).
 
 - Each run logs flattened config params, tags, metrics, the effective YAML config artifact, the request prompt artifact, the JSONL trace, the SSE log, and the final report.
+- The checked-in YAML sets the MLflow experiment to `invoice-agent` and prefixes run names as `invoice-agent-<run_id>`.
 - ADK Web invocations now emit the same MLflow run and local trace artifacts as the custom `/runs/stream` endpoint.
 - The saved request prompt artifact captures the effective planner prompt the model saw after template expansion, not just the optional reviewer hint.
 - The run directory also keeps `prompts/system_instruction.txt` and `prompts/request_prompt.txt` so prompt review still works when MLflow is disabled.

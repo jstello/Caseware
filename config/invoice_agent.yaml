@@ -81,6 +81,7 @@ agent:
 tracing:
   enabled: true
   experiment_name: invoice-agent
+  run_name_prefix: invoice-agent-
   tracking_uri: null
   enable_async_logging: true
   log_config_artifact: true

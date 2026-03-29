@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     mlflow_tracking_dir: Path | None = None
     mlflow_tracking_uri: str | None = None
     mlflow_experiment_name: str | None = None
+    mlflow_run_name_prefix: str | None = None
     mlflow_enabled: bool | None = None
 
     @cached_property
@@ -58,6 +59,8 @@ class Settings(BaseSettings):
             tracing_updates["tracking_uri"] = self.mlflow_tracking_uri
         if self.mlflow_experiment_name is not None:
             tracing_updates["experiment_name"] = self.mlflow_experiment_name
+        if self.mlflow_run_name_prefix is not None:
+            tracing_updates["run_name_prefix"] = self.mlflow_run_name_prefix
         if self.mlflow_enabled is not None:
             tracing_updates["enabled"] = self.mlflow_enabled
 

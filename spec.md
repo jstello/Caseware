@@ -32,7 +32,7 @@ Non-secret runtime behavior is defined in [`config/invoice_agent.yaml`](/Users/j
 
 - `runtime`: app name, planner mode, live model, extraction retry cap, local trace directory, and local MLflow storage path
 - `agent`: root instruction, request prompt template, live extraction prompt template, live categorization prompt template, allowed categories, and tool-to-stage mapping
-- `tracing`: MLflow experiment settings and artifact logging options
+- `tracing`: MLflow experiment settings, run-name prefix, and artifact logging options
 
 ## SSE Event Schema
 

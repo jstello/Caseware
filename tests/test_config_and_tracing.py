@@ -99,6 +99,8 @@ def test_settings_merge_yaml_and_explicit_overrides(tmp_path: Path) -> None:
     settings = Settings(
         config_path=ROOT_DIR / "config" / "invoice_agent.yaml",
         planner_mode="live",
+        mlflow_experiment_name="invoice-agent-live",
+        mlflow_run_name_prefix="live-",
         mlflow_enabled=False,
         traces_dir=tmp_path / "runs",
         mlflow_tracking_dir=tmp_path / "mlflow",
@@ -106,6 +108,8 @@ def test_settings_merge_yaml_and_explicit_overrides(tmp_path: Path) -> None:
 
     assert settings.runtime.planner_mode == "live"
     assert settings.tracing.enabled is False
+    assert settings.tracing.experiment_name == "invoice-agent-live"
+    assert settings.tracing.run_name_prefix == "live-"
     assert settings.runtime.traces_dir == (tmp_path / "runs").resolve()
     assert settings.runtime.mlflow_tracking_dir == (tmp_path / "mlflow").resolve()
     assert settings.agent.allowed_categories[0] == "Travel"
@@ -173,7 +177,7 @@ def test_mlflow_run_recorder_logs_config_prompt_and_outputs(monkeypatch, tmp_pat
 
     assert ("enable_async_logging",) in fake_mlflow.calls
     assert ("set_experiment", "invoice-agent") in fake_mlflow.calls
-    assert ("start_run", "run-123") in fake_mlflow.calls
+    assert ("start_run", "invoice-agent-run-123") in fake_mlflow.calls
     assert any(call[0] == "log_params" for call in fake_mlflow.calls)
     assert ("log_metric", "invoice_count", 2.0) in fake_mlflow.calls
     assert ("log_metric", "total_spend", 42.5) in fake_mlflow.calls
@@ -229,7 +233,7 @@ def test_mlflow_run_recorder_enables_git_version_tracking_before_run_start(
     assert recorder.version_tracking.git_dirty is True
 
     enable_index = fake_mlflow.calls.index(("enable_git_model_versioning",))
-    start_index = fake_mlflow.calls.index(("start_run", "run-123"))
+    start_index = fake_mlflow.calls.index(("start_run", "invoice-agent-run-123"))
     assert enable_index < start_index
     assert ("set_tag", "mlflow.active_model_id", "m-test-123") in fake_mlflow.calls
     assert ("set_tag", "mlflow.source.git.branch", "main") in fake_mlflow.calls

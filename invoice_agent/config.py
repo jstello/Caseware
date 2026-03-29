@@ -38,6 +38,7 @@ class AgentConfig(BaseModel):
 class TracingConfig(BaseModel):
     enabled: bool = True
     experiment_name: str = "invoice-agent"
+    run_name_prefix: str | None = None
     tracking_uri: str | None = None
     enable_async_logging: bool = True
     log_config_artifact: bool = True

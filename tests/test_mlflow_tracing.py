@@ -225,6 +225,7 @@ agent:
 tracing:
   enabled: true
   experiment_name: invoice-agent-test
+  run_name_prefix: invoice-agent-test-
   tracking_uri: null
   enable_async_logging: false
   log_config_artifact: true
@@ -265,6 +266,7 @@ tracing:
         tracing=TracingConfig(
             enabled=True,
             experiment_name="invoice-agent-test",
+            run_name_prefix="invoice-agent-test-",
             tracking_uri=None,
             enable_async_logging=False,
             log_config_artifact=True,
@@ -324,6 +326,7 @@ tracing:
     )
     assert runs, "expected an MLflow run to be recorded"
     run = runs[0]
+    assert run.info.run_name == "invoice-agent-test-run-123"
     assert run.data.params["runtime.app_name"] == "invoice-agent"
     assert run.data.params["agent.name"] == "invoice_agent"
     assert run.data.tags["run_id"] == "run-123"

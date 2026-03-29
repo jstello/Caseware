@@ -494,7 +494,7 @@ class MlflowRunRecorder:
                 and hasattr(mlflow.config, "enable_async_logging")
             ):
                 mlflow.config.enable_async_logging()
-            mlflow.start_run(run_name=self.run_id)
+            mlflow.start_run(run_name=self._mlflow_run_name())
             self._run_active = True
 
             self._log_version_tracking_tags()
@@ -674,6 +674,12 @@ class MlflowRunRecorder:
     def _default_tracking_uri(self) -> str:
         database_path = (self.config.runtime.mlflow_tracking_dir / "mlflow.db").resolve()
         return f"sqlite:///{database_path}"
+
+    def _mlflow_run_name(self) -> str:
+        prefix = self.config.tracing.run_name_prefix
+        if prefix in (None, ""):
+            return self.run_id
+        return f"{prefix}{self.run_id}"
 
     def _ensure_local_experiment(self, tracking_uri: str) -> str:
         artifact_root = (

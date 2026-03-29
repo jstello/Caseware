@@ -117,7 +117,6 @@ Validation will include:
 - unit tests for event shaping and tool outputs where appropriate
 - contract tests for the SSE event schema and ordering
 - at least one golden transcript from a deterministic mock run
-- one documented manual or semi-manual live-mode path for Gemini via ADK, if credentials are available
 
 ## Alternatives Considered
 
