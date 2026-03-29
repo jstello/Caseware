@@ -32,6 +32,26 @@ agent:
     - an issues_and_assumptions section
     Do not finalize early. Finish only after every loaded invoice has an invoice_result and both aggregate_invoices and generate_report succeed.
     Optional reviewer prompt: {prompt}.
+  live_extraction_prompt_template: |
+    Extract invoice fields from the attached invoice image and return JSON only.
+    File name: {filename}.
+    Return only these fields: vendor, invoice_date, invoice_number, total, currency, raw_category_hint, extraction_confidence, notes.
+    Use null for any uncertain field instead of guessing.
+    Do not invent vendor names, invoice dates, invoice numbers, or totals.
+    `raw_category_hint` should be a short non-binding phrase like airfare, hotel lodging, team dinner, software subscription, or office supplies when visible.
+    `extraction_confidence` must be a number between 0 and 1.
+    `notes` should mention OCR ambiguity, conflicting totals, or other visible issues.
+    Focus hint for this attempt: {focus_hint}.
+    Optional reviewer prompt: {reviewer_prompt}.
+  live_categorization_prompt_template: |
+    Categorize this invoice into exactly one allowed assignment category and return JSON only.
+    Allowed categories: {allowed_categories}.
+    If the invoice does not map cleanly or confidence is weak, choose Other and explain why in notes.
+    `confidence` must be a number between 0 and 1.
+    Raw category hint: {raw_category_hint}.
+    Normalized invoice:
+    {normalized_invoice}
+    Optional reviewer prompt: {reviewer_prompt}.
   allowed_categories:
     - Travel
     - Meals & Entertainment

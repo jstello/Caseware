@@ -8,6 +8,7 @@ from typing import Any
 from google.adk.tools.tool_context import ToolContext
 
 from .fixtures import load_fixture_manifest, match_fixture_key
+from .live_gemini import GeminiInvoiceToolAdapter
 from .schemas import ALLOWED_CATEGORIES, Category
 from .settings import Settings
 from .trace import trace_tool
@@ -42,9 +43,14 @@ def _dedupe(items: list[str]) -> list[str]:
 class InvoiceToolRegistry:
     """Constrained invoice-access tool registry."""
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        live_adapter: GeminiInvoiceToolAdapter | None = None,
+    ):
         self.settings = settings
         self.fixture_manifest = load_fixture_manifest()
+        self.live_adapter = live_adapter
 
     def tool_functions(self) -> list:
         return [
@@ -116,26 +122,34 @@ class InvoiceToolRegistry:
         """Extract invoice fields for one invoice image. Retry with a focus hint when critical fields are missing."""
 
         invoice = self._get_invoice(tool_context, invoice_id)
-        fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
         attempts = int(invoice.get("attempts", 0)) + 1
         invoice["attempts"] = attempts
 
-        extraction_attempts = fixture.get("extraction_attempts") or []
-        if extraction_attempts:
-            payload = extraction_attempts[min(attempts - 1, len(extraction_attempts) - 1)].copy()
+        if self.settings.runtime.planner_mode == "live":
+            payload = self._get_live_adapter().extract_invoice_fields(
+                invoice_path=Path(invoice["path"]),
+                reviewer_prompt=str(tool_context.state.get("run_prompt") or ""),
+                focus_hint=focus_hint,
+            ).model_dump()
+            extraction_attempts: list[dict[str, Any]] = []
         else:
-            payload = {
-                "vendor": invoice["filename"].rsplit(".", 1)[0].replace("-", " ").title(),
-                "invoice_date": None,
-                "invoice_number": None,
-                "total": None,
-                "currency": "USD",
-                "raw_category_hint": None,
-                "extraction_confidence": 0.42,
-                "notes": [
-                    "This file does not match a curated synthetic fixture, so mock extraction returned a low-confidence placeholder."
-                ],
-            }
+            fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
+            extraction_attempts = fixture.get("extraction_attempts") or []
+            if extraction_attempts:
+                payload = extraction_attempts[min(attempts - 1, len(extraction_attempts) - 1)].copy()
+            else:
+                payload = {
+                    "vendor": invoice["filename"].rsplit(".", 1)[0].replace("-", " ").title(),
+                    "invoice_date": None,
+                    "invoice_number": None,
+                    "total": None,
+                    "currency": "USD",
+                    "raw_category_hint": None,
+                    "extraction_confidence": 0.42,
+                    "notes": [
+                        "This file does not match a curated synthetic fixture, so mock extraction returned a low-confidence placeholder."
+                    ],
+                }
 
         notes = _ensure_list(payload.get("notes"))
         missing_fields = [
@@ -151,12 +165,13 @@ class InvoiceToolRegistry:
             )
         elif missing_fields:
             notes.append(
-                "The agent exhausted the mock extraction retries and will continue with normalization using assumptions."
+                "The agent exhausted the configured extraction retries and will continue with normalization using assumptions."
             )
 
         if focus_hint:
             notes.append(f"Focused retry hint: {focus_hint}.")
 
+        extraction_confidence = payload.get("extraction_confidence")
         result = {
             "invoice_id": invoice_id,
             "attempt": attempts,
@@ -164,9 +179,11 @@ class InvoiceToolRegistry:
             "invoice_date": payload.get("invoice_date"),
             "invoice_number": payload.get("invoice_number"),
             "total": payload.get("total"),
-            "currency": payload.get("currency", "USD"),
+            "currency": payload.get("currency") or "USD",
             "raw_category_hint": payload.get("raw_category_hint"),
-            "extraction_confidence": float(payload.get("extraction_confidence", 0.5)),
+            "extraction_confidence": (
+                float(extraction_confidence) if extraction_confidence is not None else 0.5
+            ),
             "notes": _dedupe(notes),
             "missing_critical_fields": missing_fields,
             "needs_retry": needs_retry,
@@ -192,27 +209,46 @@ class InvoiceToolRegistry:
         if not extracted:
             raise ValueError(f"Invoice {invoice_id} has not been extracted yet.")
 
-        fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
-        normalized = (fixture.get("normalized") or {}).copy()
-        assumptions = _ensure_list(normalized.get("assumptions"))
-        notes = _ensure_list(normalized.get("notes")) + _ensure_list(extracted.get("notes"))
-
-        if not normalized:
+        if self.settings.runtime.planner_mode == "live":
             normalized = {
                 "vendor": extracted.get("vendor"),
                 "invoice_date": extracted.get("invoice_date"),
                 "invoice_number": extracted.get("invoice_number"),
                 "total": extracted.get("total"),
-                "currency": extracted.get("currency", "USD"),
+                "currency": extracted.get("currency") or "USD",
             }
+            assumptions = []
+            notes = _ensure_list(extracted.get("notes"))
             if normalized["total"] is None:
                 assumptions.append(
-                    "No total was available in mock mode, so the invoice stays unresolved and must be categorized as Other."
+                    "The live extraction could not recover a total, so categorization must rely on context and may fall back to Other."
                 )
             if normalized["vendor"] is None:
                 assumptions.append(
-                    "Vendor information is incomplete, so the filename is the only stable identifier in mock mode."
+                    "Vendor information is incomplete, so the filename is the only stable identifier for this live extraction."
                 )
+        else:
+            fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
+            normalized = (fixture.get("normalized") or {}).copy()
+            assumptions = _ensure_list(normalized.get("assumptions"))
+            notes = _ensure_list(normalized.get("notes")) + _ensure_list(extracted.get("notes"))
+
+            if not normalized:
+                normalized = {
+                    "vendor": extracted.get("vendor"),
+                    "invoice_date": extracted.get("invoice_date"),
+                    "invoice_number": extracted.get("invoice_number"),
+                    "total": extracted.get("total"),
+                    "currency": extracted.get("currency") or "USD",
+                }
+                if normalized["total"] is None:
+                    assumptions.append(
+                        "No total was available in mock mode, so the invoice stays unresolved and must be categorized as Other."
+                    )
+                if normalized["vendor"] is None:
+                    assumptions.append(
+                        "Vendor information is incomplete, so the filename is the only stable identifier in mock mode."
+                    )
 
         result = {
             "invoice_id": invoice_id,
@@ -220,7 +256,7 @@ class InvoiceToolRegistry:
             "invoice_date": normalized.get("invoice_date"),
             "invoice_number": normalized.get("invoice_number"),
             "total": normalized.get("total"),
-            "currency": normalized.get("currency", "USD"),
+            "currency": normalized.get("currency") or "USD",
             "notes": _dedupe(notes),
             "assumptions": _dedupe(assumptions),
         }
@@ -244,31 +280,58 @@ class InvoiceToolRegistry:
         if not normalized:
             raise ValueError(f"Invoice {invoice_id} has not been normalized yet.")
 
-        fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
-        categorization = (fixture.get("categorization") or {}).copy()
         prompt = str(tool_context.state.get("run_prompt") or "").lower()
-        notes = _ensure_list(categorization.get("notes")) + _ensure_list(normalized.get("notes"))
         assumptions = _ensure_list(normalized.get("assumptions"))
+        extracted = invoice.get("extracted") or {}
 
-        category: Category = categorization.get("category", "Other")
-        confidence = float(categorization.get("confidence", 0.5))
-
-        if "conservative" in prompt and confidence < 0.75:
-            notes.append(
-                "Conservative mode moved this invoice to Other because the categorization confidence stayed below 0.75."
+        if self.settings.runtime.planner_mode == "live":
+            suggestion = self._get_live_adapter().categorize_invoice(
+                normalized_invoice={
+                    "vendor": normalized.get("vendor"),
+                    "invoice_date": normalized.get("invoice_date"),
+                    "invoice_number": normalized.get("invoice_number"),
+                    "total": normalized.get("total"),
+                    "currency": normalized.get("currency") or "USD",
+                },
+                raw_category_hint=extracted.get("raw_category_hint"),
+                reviewer_prompt=str(tool_context.state.get("run_prompt") or ""),
             )
-            category = "Other"
-            confidence = min(confidence, 0.7)
-        if category == "Other" and not any("Other" in note or "other" in note for note in notes):
-            notes.append(
-                "Other was selected because the invoice did not map cleanly to one of the assignment-defined categories."
-            )
-        if "flag unusual" in prompt and fixture.get("unusual"):
-            notes.append(str(fixture["unusual"]))
+            notes = _ensure_list(suggestion.notes) + _ensure_list(normalized.get("notes"))
+            category = str(suggestion.category or "Other")
+            confidence = float(suggestion.confidence or 0.5)
+            if category not in ALLOWED_CATEGORIES:
+                notes.append(
+                    f"The live categorizer returned unsupported category '{category}', so it was clamped to Other."
+                )
+                category = "Other"
+            if category == "Other" and not any("Other" in note or "other" in note for note in notes):
+                notes.append(
+                    "Other was selected because the invoice did not map cleanly to one of the assignment-defined categories."
+                )
+        else:
+            fixture = self.fixture_manifest.get(invoice.get("fixture_key") or "", {})
+            categorization = (fixture.get("categorization") or {}).copy()
+            notes = _ensure_list(categorization.get("notes")) + _ensure_list(normalized.get("notes"))
 
-        if category not in ALLOWED_CATEGORIES:
-            category = "Other"
-            notes.append("The mock categorizer produced an unsupported category and it was remapped to Other.")
+            category = categorization.get("category", "Other")
+            confidence = float(categorization.get("confidence", 0.5))
+
+            if "conservative" in prompt and confidence < 0.75:
+                notes.append(
+                    "Conservative mode moved this invoice to Other because the categorization confidence stayed below 0.75."
+                )
+                category = "Other"
+                confidence = min(confidence, 0.7)
+            if category == "Other" and not any("Other" in note or "other" in note for note in notes):
+                notes.append(
+                    "Other was selected because the invoice did not map cleanly to one of the assignment-defined categories."
+                )
+            if "flag unusual" in prompt and fixture.get("unusual"):
+                notes.append(str(fixture["unusual"]))
+
+            if category not in ALLOWED_CATEGORIES:
+                category = "Other"
+                notes.append("The mock categorizer produced an unsupported category and it was remapped to Other.")
 
         invoice_result = {
             "invoice_id": invoice_id,
@@ -405,3 +468,8 @@ class InvoiceToolRegistry:
     def _clear_run_outputs(self, tool_context: ToolContext) -> None:
         tool_context.state["run_summary"] = None
         tool_context.state["final_report"] = None
+
+    def _get_live_adapter(self) -> GeminiInvoiceToolAdapter:
+        if self.live_adapter is None:
+            self.live_adapter = GeminiInvoiceToolAdapter.from_settings(self.settings)
+        return self.live_adapter

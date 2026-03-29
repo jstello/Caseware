@@ -6,3 +6,4 @@ artifacts/runs/*
 !artifacts/runs/.gitkeep
 artifacts/mlflow/*
 !artifacts/mlflow/.gitkeep
+mlflow.db

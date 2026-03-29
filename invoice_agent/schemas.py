@@ -80,6 +80,53 @@ class CategorizationDecision(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
+class LiveExtractionFields(BaseModel):
+    vendor: str | None = Field(default=None, description="Vendor or issuer name.")
+    invoice_date: str | None = Field(
+        default=None,
+        description="Invoice date in YYYY-MM-DD format when visible.",
+    )
+    invoice_number: str | None = Field(
+        default=None,
+        description="Invoice number or identifier when visible.",
+    )
+    total: float | None = Field(
+        default=None,
+        description="Final invoice total as a number without currency symbols.",
+    )
+    currency: str | None = Field(
+        default="USD",
+        description="ISO-like currency code when known, otherwise null or USD.",
+    )
+    raw_category_hint: str | None = Field(
+        default=None,
+        description="Short non-binding phrase describing what the expense appears to be.",
+    )
+    extraction_confidence: float | None = Field(
+        default=None,
+        description="Confidence between 0 and 1 for the overall extraction.",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="Brief notes about ambiguity, OCR issues, or visible anomalies.",
+    )
+
+
+class LiveCategorizationSuggestion(BaseModel):
+    category: str | None = Field(
+        default=None,
+        description="One assignment category if possible. Use Other when unsure.",
+    )
+    confidence: float | None = Field(
+        default=None,
+        description="Confidence between 0 and 1 for the category choice.",
+    )
+    notes: list[str] = Field(
+        default_factory=list,
+        description="Short explanation for the category, especially when using Other.",
+    )
+
+
 class InvoiceResult(BaseModel):
     invoice_id: str
     filename: str
@@ -115,4 +162,3 @@ class SseEventEnvelope(BaseModel):
         "error",
     ]
     data: dict[str, Any]
-

@@ -29,6 +29,8 @@ class AgentConfig(BaseModel):
     description: str = "Processes invoice images using a constrained tool registry."
     system_instruction: str
     request_prompt_template: str
+    live_extraction_prompt_template: str
+    live_categorization_prompt_template: str
     allowed_categories: list[str]
     tool_stages: dict[str, str]
 
