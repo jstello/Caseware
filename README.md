@@ -118,6 +118,7 @@ MLflow tracing is enabled by default and writes to a local SQLite-backed store u
 - Tool execution is traced with lightweight decorator-based MLflow spans while the existing JSONL trace remains the reviewer-friendly source of truth.
 - Live Gemini planner decisions and live extraction/categorization tool calls also capture thought summaries, signature presence, and reasoning-token counts in MLflow spans plus a `thought_ledger.json` artifact.
 - You can point to another MLflow backend by setting `INVOICE_AGENT_MLFLOW_TRACKING_URI`.
+- Repo-local `sitecustomize.py` now exports matching `MLFLOW_BACKEND_STORE_URI` and `MLFLOW_TRACKING_URI` defaults, so plain `uv run mlflow ui` opens the same SQLite store the app writes to.
 
 ### Version Tracking
 
@@ -139,6 +140,12 @@ traces = mlflow.search_traces(model_id=model_id, return_type="list")
 If Git metadata cannot be detected, the run still proceeds normally and version tracking is skipped gracefully.
 
 If you want to inspect the local MLflow runs in the UI:
+
+```bash
+uv run mlflow ui
+```
+
+If you launch MLflow from outside the repo root, or you intentionally want an explicit command, use:
 
 ```bash
 uv run mlflow ui --backend-store-uri sqlite:////Users/juan_tello/Documents/Caseware/Caseware/artifacts/mlflow/mlflow.db

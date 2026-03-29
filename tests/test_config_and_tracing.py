@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import json
+import os
 from pathlib import Path
+import subprocess
 
 from invoice_agent.config import ROOT_DIR, flatten_mlflow_params, load_invoice_agent_config
 from invoice_agent.settings import Settings
@@ -243,3 +246,72 @@ def test_mlflow_run_recorder_enables_git_version_tracking_before_run_start(
     )
 
     assert ("disable_git_model_versioning",) in fake_mlflow.calls
+
+
+def test_sitecustomize_sets_repo_mlflow_defaults_for_cli_processes() -> None:
+    env = os.environ.copy()
+    env.pop("MLFLOW_BACKEND_STORE_URI", None)
+    env.pop("MLFLOW_TRACKING_URI", None)
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "-c",
+            (
+                "import json, os; "
+                "print(json.dumps({"
+                "'backend': os.getenv('MLFLOW_BACKEND_STORE_URI'), "
+                "'tracking': os.getenv('MLFLOW_TRACKING_URI')"
+                "}))"
+            ),
+        ],
+        cwd=ROOT_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    expected_uri = f"sqlite:///{(ROOT_DIR / 'artifacts' / 'mlflow' / 'mlflow.db').resolve()}"
+    payload = json.loads(result.stdout.strip())
+
+    assert payload == {
+        "backend": expected_uri,
+        "tracking": expected_uri,
+    }
+
+
+def test_sitecustomize_preserves_explicit_mlflow_env_overrides() -> None:
+    env = os.environ.copy()
+    env["MLFLOW_BACKEND_STORE_URI"] = "sqlite:////tmp/backend-override.db"
+    env["MLFLOW_TRACKING_URI"] = "sqlite:////tmp/tracking-override.db"
+
+    result = subprocess.run(
+        [
+            "uv",
+            "run",
+            "python",
+            "-c",
+            (
+                "import json, os; "
+                "print(json.dumps({"
+                "'backend': os.getenv('MLFLOW_BACKEND_STORE_URI'), "
+                "'tracking': os.getenv('MLFLOW_TRACKING_URI')"
+                "}))"
+            ),
+        ],
+        cwd=ROOT_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    payload = json.loads(result.stdout.strip())
+
+    assert payload == {
+        "backend": "sqlite:////tmp/backend-override.db",
+        "tracking": "sqlite:////tmp/tracking-override.db",
+    }

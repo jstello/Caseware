@@ -1,14 +1,9 @@
 from __future__ import annotations
 
-import inspect
 import json
-from dataclasses import dataclass, field
-from functools import wraps
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-
-from google.adk.tools.tool_context import ToolContext
 
 from .config import (
     InvoiceAgentConfig,
@@ -21,379 +16,13 @@ try:  # pragma: no cover - import guard keeps local tests resilient
 except Exception:  # pragma: no cover - gracefully degrade if optional dep is absent
     mlflow = None
 
-
-def mlflow_trace(*args: Any, **kwargs: Any):
-    """Return the MLflow trace decorator when available, otherwise a no-op."""
-
-    if mlflow is None:
-        def decorator(fn):
-            return fn
-
-        return decorator
-    return mlflow.trace(*args, **kwargs)
-
-
-def _sanitize_trace_input(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(key): _sanitize_trace_input(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set)):
-        return [_sanitize_trace_input(item) for item in value]
-    return str(value)
-
-
-def trace_tool(name: str | None = None):
-    """Decorator that traces tool calls with sanitized inputs when MLflow is available."""
-
-    def decorator(func):
-        if mlflow is None:
-            return func
-
-        signature = inspect.signature(func)
-
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            if hasattr(mlflow, "active_run") and mlflow.active_run() is None:
-                return func(*args, **kwargs)
-
-            bound = signature.bind_partial(*args, **kwargs)
-            sanitized_inputs = {
-                key: _sanitize_trace_input(value)
-                for key, value in bound.arguments.items()
-                if key not in {"self", "tool_context"}
-            }
-            tool_context = bound.arguments.get("tool_context")
-            invoice_id = sanitized_inputs.get("invoice_id")
-            attributes = {
-                "tool.name": name or func.__name__,
-                "tool.has_invoice": invoice_id is not None,
-            }
-            if invoice_id is not None:
-                attributes["invoice.id"] = str(invoice_id)
-            if isinstance(tool_context, ToolContext):
-                stage = tool_context.state.get("trace_current_stage")
-                if stage is None:
-                    stage = (tool_context.state.get("tool_stages") or {}).get(
-                        name or func.__name__
-                    )
-                if stage is not None:
-                    attributes["tool.stage"] = str(stage)
-                tool_call_id = (
-                    tool_context.state.get("trace_current_tool_call_id")
-                    or getattr(tool_context, "function_call_id", None)
-                )
-                if tool_call_id is not None:
-                    attributes["tool.call_id"] = str(tool_call_id)
-
-            with mlflow.start_span(
-                name=name or func.__name__,
-                span_type="TOOL",
-                attributes=attributes,
-            ) as span:
-                span.set_inputs({"tool_inputs": sanitized_inputs})
-                try:
-                    result = func(*args, **kwargs)
-                except Exception as exc:
-                    span.set_status("ERROR")
-                    span.set_outputs(
-                        {
-                            "error": {
-                                "type": type(exc).__name__,
-                                "message": str(exc),
-                            }
-                        }
-                    )
-                    raise
-                span.set_outputs(_sanitize_trace_input(result))
-                return result
-
-        return wrapper
-
-    return decorator
-
-
-@dataclass
-class _ManagedSpan:
-    context_manager: Any
-    span: Any
-
-    def close(self) -> None:
-        self.context_manager.__exit__(None, None, None)
-
-
-@dataclass(frozen=True)
-class VersionTrackingMetadata:
-    model_id: str
-    model_name: str | None
-    git_branch: str | None
-    git_commit: str | None
-    git_dirty: bool | None
-    git_repo_url: str | None
-    search_filter_string: str | None
-    git_tags: dict[str, str] = field(default_factory=dict)
-
-    def to_payload(self) -> dict[str, Any]:
-        return {
-            "model_id": self.model_id,
-            "model_name": self.model_name,
-            "git_branch": self.git_branch,
-            "git_commit": self.git_commit,
-            "git_dirty": self.git_dirty,
-            "git_repo_url": self.git_repo_url,
-            "search_filter_string": self.search_filter_string,
-        }
-
-
-class MlflowTraceSession:
-    """Maintains one nested MLflow trace for the full run lifecycle."""
-
-    def __init__(self, *, run_id: str, enabled: bool) -> None:
-        self.run_id = run_id
-        self.enabled = enabled and mlflow is not None
-        self._root_span: _ManagedSpan | None = None
-        self._invoice_spans: dict[str, _ManagedSpan] = {}
-        self._decision_spans: dict[str, _ManagedSpan] = {}
-
-    def start(
-        self,
-        run_started: dict[str, Any],
-        *,
-        version_tracking: dict[str, Any] | None = None,
-    ) -> None:
-        if not self.enabled:
-            return
-
-        try:
-            version_attributes = {}
-            if version_tracking:
-                dirty_value = version_tracking.get("git_dirty")
-                version_attributes = {
-                    "model.id": str(version_tracking.get("model_id") or ""),
-                    "model.name": str(version_tracking.get("model_name") or ""),
-                    "git.branch": str(version_tracking.get("git_branch") or ""),
-                    "git.commit": str(version_tracking.get("git_commit") or ""),
-                    "git.dirty": ""
-                    if dirty_value is None
-                    else str(dirty_value).lower(),
-                }
-
-            root = self._open_span(
-                name=f"invoice_agent_run:{self.run_id}",
-                span_type="AGENT",
-                attributes={
-                    "run.id": self.run_id,
-                    "planner.mode": str(run_started.get("mode")),
-                    "input.source_type": str(
-                        (run_started.get("input_source") or {}).get("source_type")
-                    ),
-                    "input.path": str((run_started.get("input_source") or {}).get("path")),
-                    "input.has_prompt": run_started.get("prompt") not in (None, ""),
-                    **version_attributes,
-                },
-            )
-            root.span.set_inputs(
-                {
-                    "run_started": _sanitize_trace_input(run_started),
-                    "version_tracking": _sanitize_trace_input(version_tracking),
-                }
-            )
-            self._root_span = root
-        except Exception:
-            self._disable()
-
-    def start_decision_span(
-        self,
-        *,
-        tool_call: dict[str, Any],
-        planner_progress_text: str | None,
-        planner_reasoning: dict[str, Any] | None,
-        agent_name: str | None,
-    ) -> None:
-        if not self.enabled:
-            return
-
-        try:
-            invoice_id = tool_call["args"].get("invoice_id")
-            if invoice_id is not None:
-                self._ensure_invoice_span(str(invoice_id))
-
-            decision = self._open_span(
-                name=f"planner:{tool_call['tool_name']}",
-                span_type="CHAIN",
-                attributes={
-                    "run.id": self.run_id,
-                    "tool.name": tool_call["tool_name"],
-                    "tool.call_id": tool_call["tool_call_id"],
-                    "tool.stage": tool_call["stage"],
-                    "agent.name": agent_name or "",
-                    "planner.summary_count": int(
-                        (planner_reasoning or {}).get("summary_count", 0)
-                    ),
-                    "planner.has_thought_signature": bool(
-                        (planner_reasoning or {}).get("has_thought_signature", False)
-                    ),
-                    **(
-                        {"invoice.id": str(invoice_id)}
-                        if invoice_id is not None
-                        else {}
-                    ),
-                },
-            )
-            if (planner_reasoning or {}).get("thoughts_token_count") is not None:
-                decision.span.set_attribute(
-                    "planner.thoughts_token_count",
-                    int(planner_reasoning["thoughts_token_count"]),
-                )
-            if (planner_reasoning or {}).get("total_token_count") is not None:
-                decision.span.set_attribute(
-                    "planner.total_token_count",
-                    int(planner_reasoning["total_token_count"]),
-                )
-            decision.span.set_inputs(
-                {
-                    "planner_progress_text": planner_progress_text,
-                    "planner_reasoning": _sanitize_trace_input(planner_reasoning),
-                    "tool_call": _sanitize_trace_input(tool_call),
-                }
-            )
-            self._decision_spans[tool_call["tool_call_id"]] = decision
-        except Exception:
-            self._disable()
-
-    def complete_decision_span(self, tool_result: dict[str, Any]) -> None:
-        if not self.enabled:
-            return
-
-        try:
-            decision = self._decision_spans.pop(tool_result["tool_call_id"], None)
-            if decision is None:
-                return
-            decision.span.set_outputs({"tool_result": _sanitize_trace_input(tool_result)})
-            decision.close()
-        except Exception:
-            self._disable()
-
-    def complete_invoice_span(self, invoice_event: dict[str, Any]) -> None:
-        if not self.enabled:
-            return
-
-        try:
-            invoice_id = str(invoice_event["invoice_id"])
-            invoice_span = self._invoice_spans.pop(invoice_id, None)
-            if invoice_span is None:
-                return
-            invoice_span.span.set_outputs({"invoice": _sanitize_trace_input(invoice_event["invoice"])})
-            invoice_span.close()
-        except Exception:
-            self._disable()
-
-    def complete(self, final_payload: dict[str, Any]) -> None:
-        if not self.enabled:
-            return
-
-        try:
-            self._close_all_open_decisions()
-            self._close_all_open_invoices()
-            if self._root_span is not None:
-                report = final_payload.get("report") or {}
-                summary = report.get("run_summary") or {}
-                self._root_span.span.set_outputs(
-                    {
-                        "run_summary": _sanitize_trace_input(summary),
-                        "report_path": final_payload.get("report_path"),
-                        "trace_path": final_payload.get("trace_path"),
-                        "sse_path": final_payload.get("sse_path"),
-                    }
-                )
-                self._root_span.close()
-                self._root_span = None
-        except Exception:
-            self._disable()
-
-    def fail(self, error_payload: dict[str, Any]) -> None:
-        if not self.enabled:
-            return
-
-        try:
-            for decision in list(self._decision_spans.values()):
-                decision.span.set_status("ERROR")
-                decision.span.set_outputs({"error": _sanitize_trace_input(error_payload)})
-                decision.close()
-            self._decision_spans.clear()
-
-            for invoice_span in list(self._invoice_spans.values()):
-                invoice_span.span.set_status("ERROR")
-                invoice_span.span.set_outputs({"error": _sanitize_trace_input(error_payload)})
-                invoice_span.close()
-            self._invoice_spans.clear()
-
-            if self._root_span is not None:
-                self._root_span.span.set_status("ERROR")
-                self._root_span.span.set_outputs({"error": _sanitize_trace_input(error_payload)})
-                self._root_span.close()
-                self._root_span = None
-        except Exception:
-            self._disable()
-
-    def _ensure_invoice_span(self, invoice_id: str) -> None:
-        for active_invoice_id in list(self._invoice_spans):
-            if active_invoice_id != invoice_id:
-                invoice_span = self._invoice_spans.pop(active_invoice_id)
-                invoice_span.close()
-
-        if invoice_id in self._invoice_spans:
-            return
-
-        self._invoice_spans[invoice_id] = self._open_span(
-            name=f"invoice:{invoice_id}",
-            span_type="TASK",
-            attributes={
-                "run.id": self.run_id,
-                "invoice.id": invoice_id,
-            },
-        )
-        self._invoice_spans[invoice_id].span.set_inputs({"invoice_id": invoice_id})
-
-    def _close_all_open_decisions(self) -> None:
-        for decision in list(self._decision_spans.values()):
-            decision.close()
-        self._decision_spans.clear()
-
-    def _close_all_open_invoices(self) -> None:
-        for invoice_span in list(self._invoice_spans.values()):
-            invoice_span.close()
-        self._invoice_spans.clear()
-
-    def _open_span(
-        self,
-        *,
-        name: str,
-        span_type: str,
-        attributes: dict[str, Any] | None = None,
-    ) -> _ManagedSpan:
-        context_manager = mlflow.start_span(
-            name=name,
-            span_type=span_type,
-            attributes=_sanitize_trace_input(attributes or {}),
-        )
-        return _ManagedSpan(
-            context_manager=context_manager,
-            span=context_manager.__enter__(),
-        )
-
-    def _disable(self) -> None:
-        try:
-            self._close_all_open_decisions()
-            self._close_all_open_invoices()
-            if self._root_span is not None:
-                self._root_span.close()
-        except Exception:
-            pass
-        self.enabled = False
-        self._root_span = None
+# ---------------------------------------------------------------------------
+# Auto-tracing: one line replaces ~400 lines of manual span management.
+# Every google.genai call (planner LLM, live extraction, live categorization)
+# is automatically traced with inputs, outputs, and token usage.
+# ---------------------------------------------------------------------------
+if mlflow is not None and hasattr(mlflow, "gemini"):
+    mlflow.gemini.autolog()
 
 
 class TraceWriter:
@@ -472,8 +101,6 @@ class MlflowRunRecorder:
         self.prompt = prompt
         self.enabled = mlflow is not None and config.tracing.enabled
         self._run_active = False
-        self.version_tracking: VersionTrackingMetadata | None = None
-        self._git_versioning_enabled = False
 
     def start(self) -> None:
         if not self.enabled:
@@ -487,7 +114,6 @@ class MlflowRunRecorder:
             else:
                 experiment_id = self._ensure_local_experiment(tracking_uri)
                 mlflow.set_experiment(experiment_id=experiment_id)
-            self._bootstrap_git_version_tracking()
             if (
                 self.config.tracing.enable_async_logging
                 and hasattr(mlflow, "config")
@@ -497,7 +123,6 @@ class MlflowRunRecorder:
             mlflow.start_run(run_name=self.run_id)
             self._run_active = True
 
-            self._log_version_tracking_tags()
             for key, value in {
                 "run_id": self.run_id,
                 "app": self.config.runtime.app_name,
@@ -527,13 +152,11 @@ class MlflowRunRecorder:
                 for artifact in sorted(prompt_dir.glob("*.txt")):
                     mlflow.log_artifact(str(artifact), artifact_path="prompts")
         except Exception:  # pragma: no cover - tracing must not block the run
-            self._disable_git_version_tracking()
             self.enabled = False
             self._run_active = False
 
     def finalize(self, trace_writer: TraceWriter, report: dict[str, Any] | None) -> None:
         if not self.enabled:
-            self._disable_git_version_tracking()
             return
 
         try:
@@ -563,12 +186,9 @@ class MlflowRunRecorder:
         except Exception:  # pragma: no cover - tracing must not block the run
             self.enabled = False
             self._run_active = False
-        finally:
-            self._disable_git_version_tracking()
 
     def finalize_error(self, trace_writer: TraceWriter, error: dict[str, Any]) -> None:
         if not self.enabled:
-            self._disable_git_version_tracking()
             return
 
         try:
@@ -594,82 +214,6 @@ class MlflowRunRecorder:
         except Exception:  # pragma: no cover - tracing must not block the run
             self.enabled = False
             self._run_active = False
-        finally:
-            self._disable_git_version_tracking()
-
-    def version_tracking_payload(self) -> dict[str, Any] | None:
-        if self.version_tracking is None:
-            return None
-        return self.version_tracking.to_payload()
-
-    def _bootstrap_git_version_tracking(self) -> None:
-        if mlflow is None or not hasattr(mlflow, "genai"):
-            return
-
-        try:
-            context = mlflow.genai.enable_git_model_versioning()
-            info = getattr(context, "info", None)
-            active_model = getattr(context, "active_model", None)
-            if info is None or active_model is None:
-                return
-
-            model_id = getattr(active_model, "model_id", None) or mlflow.get_active_model_id()
-            if model_id is None:
-                return
-
-            self.version_tracking = VersionTrackingMetadata(
-                model_id=str(model_id),
-                model_name=getattr(active_model, "name", None),
-                git_branch=getattr(info, "branch", None),
-                git_commit=getattr(info, "commit", None),
-                git_dirty=getattr(info, "dirty", None),
-                git_repo_url=getattr(info, "repo_url", None),
-                search_filter_string=getattr(info, "to_search_filter_string", lambda: None)(),
-                git_tags=self._build_git_tags(info),
-            )
-            self._git_versioning_enabled = True
-        except Exception:  # pragma: no cover - version tracking must not block the run
-            self.version_tracking = None
-            self._git_versioning_enabled = False
-
-    def _build_git_tags(self, info: Any) -> dict[str, str]:
-        tags: dict[str, str] = {}
-        branch = getattr(info, "branch", None)
-        commit = getattr(info, "commit", None)
-        dirty = getattr(info, "dirty", None)
-        repo_url = getattr(info, "repo_url", None)
-
-        if branch is not None:
-            tags["mlflow.source.git.branch"] = str(branch)
-        if commit is not None:
-            tags["mlflow.source.git.commit"] = str(commit)
-        if dirty is not None:
-            tags["mlflow.source.git.dirty"] = "true" if dirty else "false"
-        if repo_url is not None:
-            tags["mlflow.source.git.repoURL"] = str(repo_url)
-        return tags
-
-    def _log_version_tracking_tags(self) -> None:
-        if self.version_tracking is None:
-            return
-
-        for key, value in self.version_tracking.git_tags.items():
-            mlflow.set_tag(key, value)
-        mlflow.set_tag("mlflow.active_model_id", self.version_tracking.model_id)
-        if self.version_tracking.model_name:
-            mlflow.set_tag("mlflow.active_model_name", self.version_tracking.model_name)
-        mlflow.set_tag("mlflow.version_tracking.enabled", "true")
-
-    def _disable_git_version_tracking(self) -> None:
-        if not self._git_versioning_enabled or mlflow is None or not hasattr(mlflow, "genai"):
-            return
-
-        try:
-            mlflow.genai.disable_git_model_versioning()
-        except Exception:  # pragma: no cover - cleanup should never block tracing
-            pass
-        finally:
-            self._git_versioning_enabled = False
 
     def _default_tracking_uri(self) -> str:
         database_path = (self.config.runtime.mlflow_tracking_dir / "mlflow.db").resolve()
