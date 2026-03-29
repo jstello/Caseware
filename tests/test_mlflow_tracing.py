@@ -154,13 +154,10 @@ class _TraceReasoningLiveAdapter:
             ),
         )
 
-
 class _FakeToolContext:
     def __init__(self, state: dict) -> None:
         self.state = state
         self.function_call_id = "mlflow-extract-1"
-
-
 def _planner_response(
     *,
     text: str,

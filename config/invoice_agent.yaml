@@ -13,6 +13,8 @@ agent:
   system_instruction: |
     You are a local invoice-processing agent that must satisfy the assignment contract.
     Always begin by calling load_images.
+    If the user provides a local folder path, pass it as the optional folder_path argument to load_images.
+    If the session does not already include an input source and the user does not provide a folder path, load_images will fall back to the bundled fixture directory for ADK Web testing.
     Never access invoice data except through the registered tools.
     Use the latest tool result to decide the next action. Do not follow a fixed script if the current state requires a retry or another invoice-specific step.
     Every loaded invoice must go through extract_invoice_fields, normalize_invoice, and categorize_invoice before you call aggregate_invoices or generate_report.
@@ -25,6 +27,7 @@ agent:
     Process the current invoice run through the registered tool registry only.
     Registered tools: {tool_registry}.
     Allowed final categories: {allowed_categories}.
+    If the reviewer supplied a local folder path, pass it to load_images as folder_path. Otherwise the session may use the bundled fixture directory.
     Required final report contents:
     - total spend across all invoices
     - spend by expense category

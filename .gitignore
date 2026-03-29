@@ -7,4 +7,5 @@ artifacts/runs/*
 artifacts/mlflow/*
 !artifacts/mlflow/.gitkeep
 mlflow.db
-invoice_agent/.adk/
+.gstack/
+.adk/

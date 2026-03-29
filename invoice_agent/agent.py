@@ -7,7 +7,7 @@ from google.adk.models import Gemini
 from google.genai import types
 
 from .mock_planner import MockPlannerLlm
-from .settings import Settings
+from .settings import Settings, get_settings
 from .tools import InvoiceToolRegistry
 
 
@@ -64,6 +64,14 @@ def build_invoice_agent(
     )
 
 
+def build_root_agent(settings: Settings | None = None) -> LlmAgent:
+    effective_settings = settings or get_settings()
+    return build_invoice_agent(
+        effective_settings,
+        InvoiceToolRegistry(effective_settings),
+    )
+
+
 def build_request_prompt(settings: Settings, prompt: str | None) -> str:
     reviewer_prompt = prompt or "none"
     allowed_categories = ", ".join(settings.agent.allowed_categories)
@@ -88,3 +96,6 @@ def describe_invoice_agent_pattern() -> AgentPatternSummary:
     """Return the recommended layout summary for docs and tests."""
 
     return INVOICE_AGENT_PATTERN
+
+
+root_agent = build_root_agent()
