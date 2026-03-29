@@ -1,6 +1,6 @@
 """Invoice agent package."""
 
-from .adk_app import app, build_adk_app
+from .adk_app import app as _invoice_agent_adk_app, build_adk_app
 from .agent import (
     build_invoice_agent,
     build_root_agent,
@@ -8,6 +8,8 @@ from .agent import (
     root_agent,
 )
 from .app import app as fastapi_app, create_app
+
+app = _invoice_agent_adk_app
 
 __all__ = [
     "app",

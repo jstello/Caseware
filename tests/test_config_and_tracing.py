@@ -115,7 +115,9 @@ def test_flatten_mlflow_params_includes_prompt_and_runtime_fields() -> None:
 
     assert params["runtime.app_name"] == "invoice-agent"
     assert params["agent.tool_stages.load_images"] == "loading"
-    assert "Always begin by calling load_images." in params["agent.system_instruction"]
+    assert params["agent.system_instruction"].startswith(
+        "You are a local invoice-processing agent that must satisfy the assignment contract."
+    )
 
 
 def test_mlflow_run_recorder_logs_config_prompt_and_outputs(monkeypatch, tmp_path: Path) -> None:

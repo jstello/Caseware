@@ -64,6 +64,7 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000), choose `invoice_agent`, and
 
 - The checked-in config currently defaults to the live planner, so the UI will call Gemini unless you override it.
 - If your message includes an absolute local folder path, `load_images` will use that folder.
+- If you upload invoice images directly in the ADK Web chat, the app now materializes those uploads into a run-local folder and `load_images` will use them instead of silently falling back to bundled fixtures.
 - If you want the deterministic fixture-backed UI flow instead, run `INVOICE_AGENT_PLANNER_MODE=mock uv run adk web`. With no folder path, ADK Web falls back to the bundled fixture folder at [`fixtures/invoices`](/Users/juan_tello/Documents/Caseware/Caseware/fixtures/invoices).
 - `adk` does not need to be installed globally, `uv run adk web` is enough.
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from decimal import Decimal, ROUND_HALF_UP
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -111,6 +112,13 @@ class InvoiceToolRegistry:
         tool_context.state["invoice_refs"] = invoice_refs
         tool_context.state["invoice_order"] = [invoice["invoice_id"] for invoice in invoice_refs]
         tool_context.state["working_invoices"] = working_invoices
+        self._write_load_images_debug(
+            tool_context=tool_context,
+            folder_path=folder_path,
+            source=source,
+            notes=notes,
+            invoice_refs=invoice_refs,
+        )
 
         return {
             "invoice_count": len(invoice_refs),
@@ -501,11 +509,14 @@ class InvoiceToolRegistry:
         tool_context: ToolContext,
         folder_path: str | None,
     ) -> tuple[dict[str, Any], list[str]]:
-        existing_source = tool_context.state.get("input_source")
-        if isinstance(existing_source, dict) and existing_source.get("path"):
-            return existing_source, []
-
         user_text = self._user_text(tool_context)
+        if user_text is not None:
+            tool_context.state["run_prompt"] = user_text
+        if not tool_context.state.get("allowed_categories"):
+            tool_context.state["allowed_categories"] = list(self.settings.agent.allowed_categories)
+        if not tool_context.state.get("tool_stages"):
+            tool_context.state["tool_stages"] = dict(self.settings.agent.tool_stages)
+
         resolved_path: Path
         notes: list[str] = []
         source_hint = folder_path or self._extract_folder_path_from_text(user_text)
@@ -514,24 +525,41 @@ class InvoiceToolRegistry:
             resolved_path = Path(source_hint).expanduser().resolve()
             if not resolved_path.exists() or not resolved_path.is_dir():
                 raise ValueError(f"Input source does not exist: {resolved_path}")
+            source = {
+                "source_type": "folder",
+                "path": str(resolved_path),
+            }
             notes.append(f"Using invoice folder from the current session context: {resolved_path}.")
         else:
+            existing_source = tool_context.state.get("input_source")
+            if isinstance(existing_source, dict) and existing_source.get("path"):
+                source_path = Path(existing_source["path"]).expanduser().resolve()
+                source_type = existing_source.get("source_type")
+                if source_type == "upload_dir":
+                    notes.append(
+                        f"Using uploaded invoice files from the current session: {source_path}."
+                    )
+                else:
+                    notes.append(
+                        f"Using invoice folder from the current session context: {source_path}."
+                    )
+                source = {
+                    "source_type": source_type or "folder",
+                    "path": str(source_path),
+                }
+                tool_context.state["input_source"] = source
+                return source, notes
+
             resolved_path = self.settings.fixture_dir.resolve()
+            source = {
+                "source_type": "folder",
+                "path": str(resolved_path),
+            }
             notes.append(
                 f"No folder path was provided, so load_images defaulted to the bundled fixture directory: {resolved_path}."
             )
 
-        source = {
-            "source_type": "folder",
-            "path": str(resolved_path),
-        }
         tool_context.state["input_source"] = source
-        if user_text and not tool_context.state.get("run_prompt"):
-            tool_context.state["run_prompt"] = user_text
-        if not tool_context.state.get("allowed_categories"):
-            tool_context.state["allowed_categories"] = list(self.settings.agent.allowed_categories)
-        if not tool_context.state.get("tool_stages"):
-            tool_context.state["tool_stages"] = dict(self.settings.agent.tool_stages)
         return source, notes
 
     def _extract_folder_path_from_text(self, text: str | None) -> str | None:
@@ -558,3 +586,51 @@ class InvoiceToolRegistry:
         if not texts:
             return None
         return "\n".join(texts)
+
+    def _write_load_images_debug(
+        self,
+        *,
+        tool_context: ToolContext,
+        folder_path: str | None,
+        source: dict[str, Any],
+        notes: list[str],
+        invoice_refs: list[dict[str, Any]],
+    ) -> None:
+        invocation_id = getattr(tool_context, "invocation_id", None)
+        if not invocation_id:
+            return
+
+        run_dir = self.settings.runtime.traces_dir / str(invocation_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        debug_path = run_dir / "load_images_debug.json"
+        debug_payload = {
+            "invocation_id": str(invocation_id),
+            "folder_path_arg": folder_path,
+            "user_text": self._user_text(tool_context),
+            "tool_context_input_source": tool_context.state.get("input_source"),
+            "resolved_source": source,
+            "notes": notes,
+            "invoice_count": len(invoice_refs),
+            "invoice_filenames": [invoice_ref["filename"] for invoice_ref in invoice_refs],
+            "user_parts": [
+                {
+                    "text": getattr(part, "text", None),
+                    "inline_data": {
+                        "display_name": getattr(part.inline_data, "display_name", None),
+                        "mime_type": getattr(part.inline_data, "mime_type", None),
+                        "byte_length": len(getattr(part.inline_data, "data", b"") or b""),
+                    }
+                    if getattr(part, "inline_data", None) is not None
+                    else None,
+                    "file_data": {
+                        "display_name": getattr(part.file_data, "display_name", None),
+                        "mime_type": getattr(part.file_data, "mime_type", None),
+                        "file_uri": getattr(part.file_data, "file_uri", None),
+                    }
+                    if getattr(part, "file_data", None) is not None
+                    else None,
+                }
+                for part in getattr(getattr(tool_context, "user_content", None), "parts", []) or []
+            ],
+        }
+        debug_path.write_text(json.dumps(debug_payload, indent=2), encoding="utf-8")
