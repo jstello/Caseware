@@ -1,6 +1,6 @@
 # Invoice Agent
 
-This repository contains a local invoice-processing agent built for the Caseware take-home assignment. The implementation uses Python, FastAPI, Google ADK, a server-owned SSE adapter, and a deterministic mock-first tool pipeline.
+This repository contains a local invoice-processing agent built for the Caseware take-home assignment. The implementation uses Python, FastAPI, Google ADK, a server-owned SSE adapter, a deterministic mock-first tool pipeline, YAML-backed runtime configuration, and MLflow-backed run observability.
 
 ## What It Does
 
@@ -9,6 +9,8 @@ This repository contains a local invoice-processing agent built for the Caseware
 - Runs a planner loop through a constrained six-tool registry
 - Streams `run_started`, `progress`, `tool_call`, `tool_result`, `invoice_result`, `final_result`, and `error`
 - Produces JSONL traces plus a saved final report for every run
+- Logs MLflow experiments, run params, metrics, and trace artifacts for each run
+- Keeps prompts, model selection, tool stages, and tracing settings in [`config/invoice_agent.yaml`](/Users/juan_tello/Documents/Caseware/Caseware/config/invoice_agent.yaml)
 - Ships with six synthetic invoice fixtures and a checked-in sample trace
 
 ## Prerequisites
@@ -20,6 +22,22 @@ This repository contains a local invoice-processing agent built for the Caseware
 
 ```bash
 uv sync --group dev
+```
+
+## Configuration
+
+Non-secret runtime behavior lives in [`config/invoice_agent.yaml`](/Users/juan_tello/Documents/Caseware/Caseware/config/invoice_agent.yaml).
+
+- `runtime`: app name, planner mode, extraction retry limit, trace directory, and local MLflow storage path
+- `agent`: root agent name, description, system instruction, request prompt template, allowed categories, and tool stage labels
+- `tracing`: MLflow enablement, experiment name, tracking URI override, and artifact logging options
+
+Environment variables can still override selected values without reading any `.env` file:
+
+```bash
+export INVOICE_AGENT_PLANNER_MODE=live
+export INVOICE_AGENT_LIVE_MODEL=gemini-2.5-flash
+export INVOICE_AGENT_MLFLOW_EXPERIMENT_NAME=invoice-agent-live
 ```
 
 ## Run The API
@@ -54,6 +72,20 @@ uv run uvicorn invoice_agent.app:app --reload
 ```
 
 The repository intentionally does not read `.env` or `.env.*` files.
+
+## MLflow Tracing
+
+MLflow tracing is enabled by default and writes to a local SQLite-backed store under [`artifacts/mlflow`](/Users/juan_tello/Documents/Caseware/Caseware/artifacts/mlflow).
+
+- Each run logs flattened config params, tags, metrics, the effective YAML config artifact, the request prompt artifact, the JSONL trace, the SSE log, and the final report.
+- Tool execution is traced with lightweight decorator-based MLflow spans while the existing JSONL trace remains the reviewer-friendly source of truth.
+- You can point to another MLflow backend by setting `INVOICE_AGENT_MLFLOW_TRACKING_URI`.
+
+If you want to inspect the local MLflow runs in the UI:
+
+```bash
+uv run mlflow ui --backend-store-uri sqlite:////Users/juan_tello/Documents/Caseware/Caseware/artifacts/mlflow/mlflow.db
+```
 
 ## cURL Example: Folder Input
 
@@ -115,6 +147,8 @@ Current coverage includes:
 ## Review Artifacts
 
 - Contract tests: [`tests/test_streaming_endpoint.py`](/Users/juan_tello/Documents/Caseware/Caseware/tests/test_streaming_endpoint.py)
+- ADK pattern audit: [`documentation/adk_pattern_audit.md`](/Users/juan_tello/Documents/Caseware/Caseware/documentation/adk_pattern_audit.md)
+- YAML runtime config: [`config/invoice_agent.yaml`](/Users/juan_tello/Documents/Caseware/Caseware/config/invoice_agent.yaml)
 - Synthetic fixtures: [`fixtures/invoices`](/Users/juan_tello/Documents/Caseware/Caseware/fixtures/invoices)
 - Sample trace: [`sample_traces/mock_folder_run/trace.jsonl`](/Users/juan_tello/Documents/Caseware/Caseware/sample_traces/mock_folder_run/trace.jsonl)
 - Sample SSE log: [`sample_traces/mock_folder_run/sse_events.json`](/Users/juan_tello/Documents/Caseware/Caseware/sample_traces/mock_folder_run/sse_events.json)

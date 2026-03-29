@@ -26,6 +26,14 @@
 
 Supported image suffixes in the current implementation: `.png`, `.jpg`, `.jpeg`, `.svg`, `.webp`
 
+## Runtime Configuration
+
+Non-secret runtime behavior is defined in [`config/invoice_agent.yaml`](/Users/juan_tello/Documents/Caseware/Caseware/config/invoice_agent.yaml).
+
+- `runtime`: app name, planner mode, live model, extraction retry cap, local trace directory, and local MLflow storage path
+- `agent`: root instruction, request prompt template, allowed categories, and tool-to-stage mapping
+- `tracing`: MLflow experiment settings and artifact logging options
+
 ## SSE Event Schema
 
 ### `run_started`
@@ -135,6 +143,15 @@ Supported image suffixes in the current implementation: `.png`, `.jpg`, `.jpeg`,
 - `invoice_result` is emitted immediately after a successful `categorize_invoice` result.
 - `final_result` is emitted once, after the agent loop finishes and the report has been saved.
 - `error` terminates the run without `final_result`.
+
+## Observability Outputs
+
+Each run produces:
+
+- JSONL execution trace at `trace_path`
+- JSONL SSE log at `sse_path`
+- Final structured report at `report_path`
+- An MLflow run in the local SQLite-backed experiment store containing flattened config params, tags, summary metrics, the effective config artifact, the request prompt artifact when present, and the saved run artifacts
 
 ## Tool Registry
 

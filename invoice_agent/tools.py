@@ -10,6 +10,7 @@ from google.adk.tools.tool_context import ToolContext
 from .fixtures import load_fixture_manifest, match_fixture_key
 from .schemas import ALLOWED_CATEGORIES, Category
 from .settings import Settings
+from .trace import trace_tool
 
 
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".svg", ".webp"}
@@ -55,6 +56,7 @@ class InvoiceToolRegistry:
             self.generate_report,
         ]
 
+    @trace_tool()
     def load_images(self, tool_context: ToolContext) -> dict[str, Any]:
         """Discover the invoice image files available for the current run."""
 
@@ -104,6 +106,7 @@ class InvoiceToolRegistry:
             ),
         }
 
+    @trace_tool()
     def extract_invoice_fields(
         self,
         invoice_id: str,
@@ -138,7 +141,7 @@ class InvoiceToolRegistry:
         missing_fields = [
             field for field in CRITICAL_FIELDS if payload.get(field) in (None, "", [])
         ]
-        max_attempts = max(self.settings.max_extraction_attempts, len(extraction_attempts))
+        max_attempts = max(self.settings.runtime.max_extraction_attempts, len(extraction_attempts))
         needs_retry = bool(missing_fields) and attempts < max_attempts
         retry_focus_hint = None
         if needs_retry:
@@ -174,6 +177,7 @@ class InvoiceToolRegistry:
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
         return result
 
+    @trace_tool()
     def normalize_invoice(
         self,
         invoice_id: str,
@@ -223,6 +227,7 @@ class InvoiceToolRegistry:
         tool_context.state["working_invoices"] = tool_context.state["working_invoices"]
         return result
 
+    @trace_tool()
     def categorize_invoice(
         self,
         invoice_id: str,
@@ -287,6 +292,7 @@ class InvoiceToolRegistry:
             "invoice_result": invoice_result,
         }
 
+    @trace_tool()
     def aggregate_invoices(self, tool_context: ToolContext) -> dict[str, Any]:
         """Aggregate the processed invoices into run-level totals and category totals."""
 
@@ -310,6 +316,7 @@ class InvoiceToolRegistry:
         tool_context.state["run_summary"] = summary
         return summary
 
+    @trace_tool()
     def generate_report(self, tool_context: ToolContext) -> dict[str, Any]:
         """Generate the final structured run output from the aggregated results and the per-invoice records."""
 

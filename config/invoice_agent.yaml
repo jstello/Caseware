@@ -1,0 +1,51 @@
+runtime:
+  app_name: invoice-agent
+  planner_mode: mock
+  live_model: gemini-2.5-flash
+  max_extraction_attempts: 2
+  traces_dir: artifacts/runs
+  mlflow_tracking_dir: artifacts/mlflow
+  fixture_manifest_path: fixtures/invoices/manifest.json
+
+agent:
+  name: invoice_agent
+  description: Processes invoice images using a constrained tool registry.
+  system_instruction: |
+    You are a local invoice-processing agent.
+    Always begin by calling load_images.
+    For each invoice, decide what to do next from the latest tool output.
+    If extract_invoice_fields reports missing critical fields and suggests a retry,
+    retry extraction before normalizing.
+    Once all invoices are categorized, aggregate the totals and generate the final report.
+    Never access invoice data except through the registered tools.
+  request_prompt_template: |
+    Process the current invoice run. You may only inspect invoice data through the registered tools.
+    Optional reviewer prompt: {prompt}.
+  allowed_categories:
+    - Travel
+    - Meals & Entertainment
+    - Software / Subscriptions
+    - Professional Services
+    - Office Supplies
+    - Shipping / Postage
+    - Utilities
+    - Other
+  tool_stages:
+    load_images: loading
+    extract_invoice_fields: extraction
+    normalize_invoice: normalization
+    categorize_invoice: categorization
+    aggregate_invoices: aggregation
+    generate_report: reporting
+
+tracing:
+  enabled: true
+  experiment_name: invoice-agent
+  tracking_uri: null
+  enable_async_logging: true
+  log_config_artifact: true
+  log_trace_artifacts: true
+  log_prompt_artifacts: true
+  tags:
+    app: invoice-agent
+    source: local

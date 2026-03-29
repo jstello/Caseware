@@ -6,26 +6,15 @@ from typing import Any, AsyncGenerator
 from uuid import uuid4
 
 from fastapi import HTTPException, UploadFile
-from google.adk.agents import LlmAgent
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
-from .mock_planner import MockPlannerLlm
+from .agent import build_invoice_agent, build_request_prompt
 from .schemas import PreparedInputSource
 from .settings import Settings, get_settings
 from .tools import InvoiceToolRegistry
-from .trace import TraceWriter
-
-
-TOOL_STAGES = {
-    "load_images": "loading",
-    "extract_invoice_fields": "extraction",
-    "normalize_invoice": "normalization",
-    "categorize_invoice": "categorization",
-    "aggregate_invoices": "aggregation",
-    "generate_report": "reporting",
-}
+from .trace import MlflowRunRecorder, TraceWriter
 
 
 class InvoiceAgentService:
@@ -38,7 +27,7 @@ class InvoiceAgentService:
         return uuid4().hex[:12]
 
     def create_run_dir(self, run_id: str) -> Path:
-        run_dir = self.settings.traces_dir / run_id
+        run_dir = self.settings.runtime.traces_dir / run_id
         run_dir.mkdir(parents=True, exist_ok=True)
         return run_dir
 
@@ -73,8 +62,15 @@ class InvoiceAgentService:
         prompt: str | None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         trace_writer = TraceWriter(run_dir)
+        mlflow_recorder = MlflowRunRecorder(
+            run_id=run_id,
+            run_dir=run_dir,
+            config=self.settings.config,
+            prompt=prompt,
+        )
+        mlflow_recorder.start()
         invoice_tools = InvoiceToolRegistry(self.settings)
-        agent = self._build_agent(invoice_tools)
+        agent = build_invoice_agent(self.settings, invoice_tools)
         session_service = InMemorySessionService()
         runner = Runner(
             app_name=self.settings.app_name,
@@ -84,18 +80,7 @@ class InvoiceAgentService:
         initial_state = {
             "input_source": prepared_input.model_dump(),
             "run_prompt": prompt or "",
-            "allowed_categories": list(
-                [
-                    "Travel",
-                    "Meals & Entertainment",
-                    "Software / Subscriptions",
-                    "Professional Services",
-                    "Office Supplies",
-                    "Shipping / Postage",
-                    "Utilities",
-                    "Other",
-                ]
-            ),
+            "allowed_categories": list(self.settings.agent.allowed_categories),
         }
         await session_service.create_session(
             app_name=self.settings.app_name,
@@ -106,7 +91,7 @@ class InvoiceAgentService:
 
         run_started = {
             "run_id": run_id,
-            "mode": self.settings.planner_mode,
+            "mode": self.settings.runtime.planner_mode,
             "input_source": prepared_input.model_dump(),
             "prompt": prompt,
         }
@@ -122,10 +107,7 @@ class InvoiceAgentService:
                     role="user",
                     parts=[
                         types.Part(
-                            text=(
-                                "Process the current invoice run. You may only inspect invoice data through the registered tools. "
-                                f"Optional reviewer prompt: {prompt or 'none'}."
-                            )
+                            text=build_request_prompt(self.settings, prompt)
                         )
                     ],
                 ),
@@ -146,7 +128,7 @@ class InvoiceAgentService:
                                 "run_id": run_id,
                                 "tool_name": tool_name,
                                 "tool_call_id": part.function_call.id,
-                                "stage": TOOL_STAGES.get(tool_name, "tooling"),
+                                "stage": self.settings.agent.tool_stages.get(tool_name, "tooling"),
                                 "args": dict(part.function_call.args or {}),
                             }
                             trace_writer.write_trace(
@@ -166,7 +148,7 @@ class InvoiceAgentService:
                                 "run_id": run_id,
                                 "tool_name": tool_name,
                                 "tool_call_id": part.function_response.id,
-                                "stage": TOOL_STAGES.get(tool_name, "tooling"),
+                                "stage": self.settings.agent.tool_stages.get(tool_name, "tooling"),
                                 "result": response_payload,
                             }
                             trace_writer.write_trace(
@@ -201,6 +183,7 @@ class InvoiceAgentService:
             }
             trace_writer.write_trace(kind="error", payload=error_payload)
             yield self._record_sse(trace_writer, "error", error_payload)
+            mlflow_recorder.finalize_error(trace_writer, error_payload)
             return
 
         if final_report is None:
@@ -211,6 +194,7 @@ class InvoiceAgentService:
             }
             trace_writer.write_trace(kind="error", payload=error_payload)
             yield self._record_sse(trace_writer, "error", error_payload)
+            mlflow_recorder.finalize_error(trace_writer, error_payload)
             return
 
         trace_writer.write_report(final_report)
@@ -226,27 +210,7 @@ class InvoiceAgentService:
             payload={"report": final_report},
         )
         yield self._record_sse(trace_writer, "final_result", final_payload)
-
-    def _build_agent(self, invoice_tools: InvoiceToolRegistry) -> LlmAgent:
-        model: str | MockPlannerLlm
-        if self.settings.planner_mode == "live":
-            model = self.settings.live_model
-        else:
-            model = MockPlannerLlm()
-        return LlmAgent(
-            name="invoice_agent",
-            model=model,
-            description="Processes invoice images using a constrained tool registry.",
-            instruction=(
-                "You are a local invoice-processing agent. "
-                "Always begin by calling load_images. "
-                "For each invoice, decide what to do next from the latest tool output. "
-                "If extract_invoice_fields reports missing critical fields and suggests a retry, retry extraction before normalizing. "
-                "Once all invoices are categorized, aggregate the totals and generate the final report. "
-                "Never access invoice data except through the registered tools."
-            ),
-            tools=invoice_tools.tool_functions(),
-        )
+        mlflow_recorder.finalize(trace_writer, final_report)
 
     def _record_sse(
         self, trace_writer: TraceWriter, event: str, data: dict[str, Any]
