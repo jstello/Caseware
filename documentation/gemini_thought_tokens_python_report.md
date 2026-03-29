@@ -83,6 +83,16 @@ So if the goal is to surface reasoning tokens cleanly, the practical recipe is:
 
 For the invoice agent, the safest pattern is to log `thoughts_token_count` to tracing, and optionally store thought summaries only in developer-facing artifacts such as traces or MLflow runs. That gives reviewers observability into reasoning cost and planner behavior without depending on hidden model internals.
 
+## Current repository implementation
+
+This repository now follows that pattern in live Gemini mode:
+
+- The root ADK planner enables `include_thoughts=True`.
+- Direct Gemini extraction and categorization calls also enable `include_thoughts=True`.
+- SDK-exposed thought summaries, signature presence, and reasoning-token counts are captured into internal JSONL traces, MLflow spans, and `thought_ledger.json`.
+- Live tool responses keep an internal `reasoning` envelope so later planner turns can see earlier tool reasoning through normal function-response history.
+- Public SSE payloads deliberately redact that reasoning metadata, so the reviewer-facing stream contract stays unchanged.
+
 ## Sources
 
 - [Gemini thinking docs](https://ai.google.dev/gemini-api/docs/thinking)

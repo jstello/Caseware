@@ -11,6 +11,7 @@ This repository contains a local invoice-processing agent built for the Caseware
 - Streams `run_started`, `progress`, `tool_call`, `tool_result`, `invoice_result`, `final_result`, and `error`
 - Produces JSONL traces plus a saved final report for every run
 - Logs MLflow experiments, run params, metrics, and trace artifacts for each run
+- Captures live Gemini thought summaries in internal traces and MLflow while keeping the public SSE contract unchanged
 - Keeps prompts, model selection, tool stages, and tracing settings in [`config/invoice_agent.yaml`](/Users/juan_tello/Documents/Caseware/Caseware/config/invoice_agent.yaml)
 - Ships with six synthetic invoice fixtures and a checked-in sample trace
 
@@ -60,6 +61,7 @@ Mock mode is the intended development and test path.
 - It uses deterministic synthetic fixtures so traces and tests are reviewable.
 - One fixture intentionally triggers a second extraction attempt to prove the planner makes a tool decision from intermediate results.
 - The runtime blocks premature `aggregate_invoices` or `generate_report` calls until every loaded invoice has been categorized.
+- In live mode, SDK-exposed Gemini thought summaries are preserved in internal trace artifacts and tool-response history so later planner turns can see earlier tool reasoning without exposing those summaries on the public SSE stream.
 
 ## Optional Live Planner Mode
 
@@ -91,6 +93,7 @@ MLflow tracing is enabled by default and writes to a local SQLite-backed store u
 - The saved request prompt artifact captures the effective planner prompt the model saw after template expansion, not just the optional reviewer hint.
 - The run directory also keeps `prompts/system_instruction.txt` and `prompts/request_prompt.txt` so prompt review still works when MLflow is disabled.
 - Tool execution is traced with lightweight decorator-based MLflow spans while the existing JSONL trace remains the reviewer-friendly source of truth.
+- Live Gemini planner decisions and live extraction/categorization tool calls also capture thought summaries, signature presence, and reasoning-token counts in MLflow spans plus a `thought_ledger.json` artifact.
 - You can point to another MLflow backend by setting `INVOICE_AGENT_MLFLOW_TRACKING_URI`.
 
 ### Version Tracking
