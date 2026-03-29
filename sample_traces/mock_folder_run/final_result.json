@@ -1,0 +1,145 @@
+{
+  "run_summary": {
+    "total_spend": 1508.32,
+    "spend_by_category": {
+      "Office Supplies": 84.32,
+      "Other": 148.5,
+      "Shipping / Postage": 87.4,
+      "Software / Subscriptions": 157.0,
+      "Travel": 1031.1
+    },
+    "invoice_count": 6
+  },
+  "invoices": [
+    {
+      "invoice_id": "acme-air-travel-001",
+      "filename": "acme-air-travel-001.svg",
+      "vendor": "Acme Air",
+      "invoice_date": "2026-02-15",
+      "invoice_number": "AA-1007",
+      "total": 642.1,
+      "assigned_category": "Travel",
+      "confidence": 0.98,
+      "notes": [
+        "Airfare maps directly to Travel.",
+        "The flight fare already matched the stamped total.",
+        "OCR was clean on the first pass."
+      ]
+    },
+    {
+      "invoice_id": "bright-stationery-noisy",
+      "filename": "bright-stationery-noisy.svg",
+      "vendor": "Bright Stationery",
+      "invoice_date": "2026-02-23",
+      "invoice_number": "BS-449",
+      "total": 84.32,
+      "assigned_category": "Office Supplies",
+      "confidence": 0.78,
+      "notes": [
+        "Pens, markers, and paper were the dominant line items.",
+        "The fallback extraction pass resolved the missing critical fields.",
+        "A targeted retry recovered the store name and the total from the footer.",
+        "Focused retry hint: vendor, total.",
+        "The agent needed a second extraction attempt because the invoice image is intentionally noisy.",
+        "The document quality is poor, so the result should stay flagged for manual spot checking."
+      ]
+    },
+    {
+      "invoice_id": "harbor-hotel-missing-number",
+      "filename": "harbor-hotel-missing-number.svg",
+      "vendor": "Harbor Hotel",
+      "invoice_date": "2026-02-18",
+      "invoice_number": null,
+      "total": 389.0,
+      "assigned_category": "Travel",
+      "confidence": 0.93,
+      "notes": [
+        "Hotel charges map directly to Travel.",
+        "The folio total was already normalized.",
+        "The hotel folio is legible, but it does not show an invoice number.",
+        "Invoice number is absent in the source image, so the report leaves it blank."
+      ]
+    },
+    {
+      "invoice_id": "nordstack-software-bundle",
+      "filename": "nordstack-software-bundle.svg",
+      "vendor": "NordStack Software",
+      "invoice_date": "2026-02-21",
+      "invoice_number": "NS-7741",
+      "total": 157.0,
+      "assigned_category": "Software / Subscriptions",
+      "confidence": 0.97,
+      "notes": [
+        "The invoice is a clear software subscription purchase.",
+        "Line items were normalized to the stamped invoice total.",
+        "The multi-line subscription bundle is still easy to total in mock mode."
+      ]
+    },
+    {
+      "invoice_id": "shipright-conflicting-total",
+      "filename": "shipright-conflicting-total.svg",
+      "vendor": "ShipRight Logistics",
+      "invoice_date": "2026-02-24",
+      "invoice_number": "SR-882",
+      "total": 87.4,
+      "assigned_category": "Shipping / Postage",
+      "confidence": 0.87,
+      "notes": [
+        "The invoice is clearly for package shipment charges.",
+        "Normalization preferred the stamped total over the line-item subtotal because the surcharge was corrected by hand.",
+        "The subtotal and the stamped total conflict in the source image.",
+        "Totals conflict in the source document, so normalization had to choose the stamped amount.",
+        "The stamped amount was treated as the source of truth when totals conflicted."
+      ]
+    },
+    {
+      "invoice_id": "team-bistro-ambiguous",
+      "filename": "team-bistro-ambiguous.svg",
+      "vendor": "Team Bistro",
+      "invoice_date": "2026-02-19",
+      "invoice_number": "TB-204",
+      "total": 148.5,
+      "assigned_category": "Other",
+      "confidence": 0.68,
+      "notes": [
+        "Meals & Entertainment is the most plausible category, but the business purpose is ambiguous.",
+        "The line items were already summarized into a single total.",
+        "The document looks like a restaurant invoice for a team dinner.",
+        "Conservative mode moved this invoice to Other because the categorization confidence stayed below 0.75.",
+        "The invoice is ambiguous enough that a conservative reviewer may want to re-check the category.",
+        "The invoice does not say whether the meal was customer-facing or internal."
+      ]
+    }
+  ],
+  "issues_and_assumptions": [
+    "acme-air-travel-001.svg: OCR was clean on the first pass.",
+    "acme-air-travel-001.svg: The flight fare already matched the stamped total.",
+    "acme-air-travel-001.svg: Airfare maps directly to Travel.",
+    "bright-stationery-noisy.svg: The first OCR pass is noisy and misses both the vendor and the total.",
+    "bright-stationery-noisy.svg: Critical fields are still missing after attempt 1; a targeted retry should focus on vendor, total.",
+    "bright-stationery-noisy.svg: A targeted retry recovered the store name and the total from the footer.",
+    "bright-stationery-noisy.svg: Focused retry hint: vendor, total.",
+    "bright-stationery-noisy.svg: The fallback extraction pass resolved the missing critical fields.",
+    "bright-stationery-noisy.svg: The document quality is poor, so the result should stay flagged for manual spot checking.",
+    "bright-stationery-noisy.svg: Pens, markers, and paper were the dominant line items.",
+    "bright-stationery-noisy.svg: The agent needed a second extraction attempt because the invoice image is intentionally noisy.",
+    "harbor-hotel-missing-number.svg: The hotel folio is legible, but it does not show an invoice number.",
+    "harbor-hotel-missing-number.svg: The folio total was already normalized.",
+    "harbor-hotel-missing-number.svg: Invoice number is absent in the source image, so the report leaves it blank.",
+    "harbor-hotel-missing-number.svg: Hotel charges map directly to Travel.",
+    "nordstack-software-bundle.svg: The multi-line subscription bundle is still easy to total in mock mode.",
+    "nordstack-software-bundle.svg: Line items were normalized to the stamped invoice total.",
+    "nordstack-software-bundle.svg: The invoice is a clear software subscription purchase.",
+    "shipright-conflicting-total.svg: The subtotal and the stamped total conflict in the source image.",
+    "shipright-conflicting-total.svg: Normalization preferred the stamped total over the line-item subtotal because the surcharge was corrected by hand.",
+    "shipright-conflicting-total.svg: The stamped amount was treated as the source of truth when totals conflicted.",
+    "shipright-conflicting-total.svg: The invoice is clearly for package shipment charges.",
+    "shipright-conflicting-total.svg: Totals conflict in the source document, so normalization had to choose the stamped amount.",
+    "team-bistro-ambiguous.svg: The document looks like a restaurant invoice for a team dinner.",
+    "team-bistro-ambiguous.svg: The line items were already summarized into a single total.",
+    "team-bistro-ambiguous.svg: The invoice does not say whether the meal was customer-facing or internal.",
+    "team-bistro-ambiguous.svg: Meals & Entertainment is the most plausible category, but the business purpose is ambiguous.",
+    "team-bistro-ambiguous.svg: Conservative mode moved this invoice to Other because the categorization confidence stayed below 0.75.",
+    "team-bistro-ambiguous.svg: The invoice is ambiguous enough that a conservative reviewer may want to re-check the category."
+  ]
+}

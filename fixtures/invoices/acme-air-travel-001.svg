@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200">
+  <rect width="100%" height="100%" fill="#fbfaf5" />
+  <rect x="40" y="40" width="820" height="1120" rx="24" fill="#ffffff" stroke="#1f2937" stroke-width="3" />
+  <text x="80" y="120" font-size="40" font-family="Georgia, serif" fill="#0f172a">Acme Air</text>
+  <text x="80" y="168" font-size="22" font-family="Menlo, monospace" fill="#334155">Invoice AA-1007</text>
+  <text x="80" y="210" font-size="20" font-family="Menlo, monospace" fill="#475569">Invoice date: 2026-02-15</text>
+  <line x1="80" y1="260" x2="820" y2="260" stroke="#cbd5e1" stroke-width="2" />
+  <text x="80" y="320" font-size="24" font-family="Helvetica, Arial, sans-serif" fill="#111827">Roundtrip airfare</text>
+  <text x="680" y="320" font-size="24" font-family="Helvetica, Arial, sans-serif" fill="#111827">$642.10</text>
+  <text x="80" y="380" font-size="20" font-family="Helvetica, Arial, sans-serif" fill="#475569">Traveler: Dana Reed</text>
+  <text x="80" y="420" font-size="20" font-family="Helvetica, Arial, sans-serif" fill="#475569">Route: NYC → SFO</text>
+  <text x="80" y="500" font-size="28" font-family="Georgia, serif" fill="#0f172a">Total Due</text>
+  <text x="640" y="500" font-size="34" font-family="Georgia, serif" fill="#0f172a">$642.10</text>
+</svg>

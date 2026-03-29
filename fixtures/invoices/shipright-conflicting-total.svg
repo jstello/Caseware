@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="1200" viewBox="0 0 900 1200">
+  <rect width="100%" height="100%" fill="#f8fafc" />
+  <rect x="40" y="40" width="820" height="1120" rx="24" fill="#ffffff" stroke="#1d4ed8" stroke-width="3" />
+  <text x="80" y="120" font-size="40" font-family="Georgia, serif" fill="#1e40af">ShipRight Logistics</text>
+  <text x="80" y="168" font-size="22" font-family="Menlo, monospace" fill="#2563eb">Invoice SR-882</text>
+  <text x="80" y="208" font-size="20" font-family="Menlo, monospace" fill="#2563eb">Date: 2026-02-24</text>
+  <line x1="80" y1="260" x2="820" y2="260" stroke="#93c5fd" stroke-width="2" />
+  <text x="80" y="320" font-size="24" font-family="Helvetica, Arial, sans-serif" fill="#111827">Shipping subtotal</text>
+  <text x="690" y="320" font-size="24" font-family="Helvetica, Arial, sans-serif" fill="#111827">$89.40</text>
+  <text x="80" y="380" font-size="22" font-family="Helvetica, Arial, sans-serif" fill="#b91c1c">Stamped correction total</text>
+  <text x="675" y="380" font-size="22" font-family="Helvetica, Arial, sans-serif" fill="#b91c1c">$87.40</text>
+  <text x="80" y="500" font-size="18" font-family="Helvetica, Arial, sans-serif" fill="#475569">This synthetic invoice forces normalization to resolve a total conflict.</text>
+</svg>

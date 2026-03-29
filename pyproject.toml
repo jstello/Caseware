@@ -1,0 +1,31 @@
+[project]
+name = "invoice-agent"
+version = "0.1.0"
+description = "Mock-first invoice processing agent for the Caseware take-home assignment"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.115.12",
+  "google-adk==1.28.0",
+  "httpx>=0.28.1",
+  "pydantic-settings>=2.10.1",
+  "sse-starlette>=3.0.2",
+  "uvicorn>=0.34.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3.5",
+  "pytest-asyncio>=0.24.0",
+]
+
+[build-system]
+requires = ["setuptools>=80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["invoice_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

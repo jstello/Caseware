@@ -1,0 +1,229 @@
+{
+  "acme-air-travel-001": {
+    "extraction_attempts": [
+      {
+        "vendor": "Acme Air",
+        "invoice_date": "2026-02-15",
+        "invoice_number": "AA-1007",
+        "total": 642.1,
+        "currency": "USD",
+        "raw_category_hint": "airfare",
+        "extraction_confidence": 0.98,
+        "notes": [
+          "OCR was clean on the first pass."
+        ]
+      }
+    ],
+    "normalized": {
+      "vendor": "Acme Air",
+      "invoice_date": "2026-02-15",
+      "invoice_number": "AA-1007",
+      "total": 642.1,
+      "currency": "USD",
+      "notes": [
+        "The flight fare already matched the stamped total."
+      ],
+      "assumptions": []
+    },
+    "categorization": {
+      "category": "Travel",
+      "confidence": 0.98,
+      "notes": [
+        "Airfare maps directly to Travel."
+      ]
+    }
+  },
+  "harbor-hotel-missing-number": {
+    "extraction_attempts": [
+      {
+        "vendor": "Harbor Hotel",
+        "invoice_date": "2026-02-18",
+        "invoice_number": null,
+        "total": 389.0,
+        "currency": "USD",
+        "raw_category_hint": "hotel lodging",
+        "extraction_confidence": 0.9,
+        "notes": [
+          "The hotel folio is legible, but it does not show an invoice number."
+        ]
+      }
+    ],
+    "normalized": {
+      "vendor": "Harbor Hotel",
+      "invoice_date": "2026-02-18",
+      "invoice_number": null,
+      "total": 389.0,
+      "currency": "USD",
+      "notes": [
+        "The folio total was already normalized."
+      ],
+      "assumptions": [
+        "Invoice number is absent in the source image, so the report leaves it blank."
+      ]
+    },
+    "categorization": {
+      "category": "Travel",
+      "confidence": 0.93,
+      "notes": [
+        "Hotel charges map directly to Travel."
+      ]
+    }
+  },
+  "team-bistro-ambiguous": {
+    "extraction_attempts": [
+      {
+        "vendor": "Team Bistro",
+        "invoice_date": "2026-02-19",
+        "invoice_number": "TB-204",
+        "total": 148.5,
+        "currency": "USD",
+        "raw_category_hint": "team dinner",
+        "extraction_confidence": 0.84,
+        "notes": [
+          "The document looks like a restaurant invoice for a team dinner."
+        ]
+      }
+    ],
+    "normalized": {
+      "vendor": "Team Bistro",
+      "invoice_date": "2026-02-19",
+      "invoice_number": "TB-204",
+      "total": 148.5,
+      "currency": "USD",
+      "notes": [
+        "The line items were already summarized into a single total."
+      ],
+      "assumptions": [
+        "The invoice does not say whether the meal was customer-facing or internal."
+      ]
+    },
+    "categorization": {
+      "category": "Meals & Entertainment",
+      "confidence": 0.68,
+      "notes": [
+        "Meals & Entertainment is the most plausible category, but the business purpose is ambiguous."
+      ]
+    },
+    "unusual": "The invoice is ambiguous enough that a conservative reviewer may want to re-check the category."
+  },
+  "nordstack-software-bundle": {
+    "extraction_attempts": [
+      {
+        "vendor": "NordStack Software",
+        "invoice_date": "2026-02-21",
+        "invoice_number": "NS-7741",
+        "total": 157.0,
+        "currency": "USD",
+        "raw_category_hint": "software bundle",
+        "extraction_confidence": 0.96,
+        "notes": [
+          "The multi-line subscription bundle is still easy to total in mock mode."
+        ]
+      }
+    ],
+    "normalized": {
+      "vendor": "NordStack Software",
+      "invoice_date": "2026-02-21",
+      "invoice_number": "NS-7741",
+      "total": 157.0,
+      "currency": "USD",
+      "notes": [
+        "Line items were normalized to the stamped invoice total."
+      ],
+      "assumptions": []
+    },
+    "categorization": {
+      "category": "Software / Subscriptions",
+      "confidence": 0.97,
+      "notes": [
+        "The invoice is a clear software subscription purchase."
+      ]
+    }
+  },
+  "bright-stationery-noisy": {
+    "extraction_attempts": [
+      {
+        "vendor": null,
+        "invoice_date": "2026-02-23",
+        "invoice_number": "BS-449",
+        "total": null,
+        "currency": "USD",
+        "raw_category_hint": "office goods",
+        "extraction_confidence": 0.51,
+        "notes": [
+          "The first OCR pass is noisy and misses both the vendor and the total."
+        ]
+      },
+      {
+        "vendor": "Bright Stationery",
+        "invoice_date": "2026-02-23",
+        "invoice_number": "BS-449",
+        "total": 84.32,
+        "currency": "USD",
+        "raw_category_hint": "office goods",
+        "extraction_confidence": 0.83,
+        "notes": [
+          "A targeted retry recovered the store name and the total from the footer."
+        ]
+      }
+    ],
+    "normalized": {
+      "vendor": "Bright Stationery",
+      "invoice_date": "2026-02-23",
+      "invoice_number": "BS-449",
+      "total": 84.32,
+      "currency": "USD",
+      "notes": [
+        "The fallback extraction pass resolved the missing critical fields."
+      ],
+      "assumptions": [
+        "The document quality is poor, so the result should stay flagged for manual spot checking."
+      ]
+    },
+    "categorization": {
+      "category": "Office Supplies",
+      "confidence": 0.78,
+      "notes": [
+        "Pens, markers, and paper were the dominant line items."
+      ]
+    },
+    "unusual": "The agent needed a second extraction attempt because the invoice image is intentionally noisy."
+  },
+  "shipright-conflicting-total": {
+    "extraction_attempts": [
+      {
+        "vendor": "ShipRight Logistics",
+        "invoice_date": "2026-02-24",
+        "invoice_number": "SR-882",
+        "total": 89.4,
+        "currency": "USD",
+        "raw_category_hint": "shipping label",
+        "extraction_confidence": 0.79,
+        "notes": [
+          "The subtotal and the stamped total conflict in the source image."
+        ]
+      }
+    ],
+    "normalized": {
+      "vendor": "ShipRight Logistics",
+      "invoice_date": "2026-02-24",
+      "invoice_number": "SR-882",
+      "total": 87.4,
+      "currency": "USD",
+      "notes": [
+        "Normalization preferred the stamped total over the line-item subtotal because the surcharge was corrected by hand."
+      ],
+      "assumptions": [
+        "The stamped amount was treated as the source of truth when totals conflicted."
+      ]
+    },
+    "categorization": {
+      "category": "Shipping / Postage",
+      "confidence": 0.87,
+      "notes": [
+        "The invoice is clearly for package shipment charges."
+      ]
+    },
+    "unusual": "Totals conflict in the source document, so normalization had to choose the stamped amount."
+  }
+}
