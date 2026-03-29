@@ -105,6 +105,7 @@ def test_mlflow_run_recorder_logs_config_prompt_and_outputs(monkeypatch, tmp_pat
     recorder = MlflowRunRecorder(
         run_id="run-123",
         run_dir=run_dir,
+        config_path=ROOT_DIR / "config" / "invoice_agent.yaml",
         config=config,
         prompt="Use conservative categorization.",
     )

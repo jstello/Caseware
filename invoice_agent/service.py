@@ -65,6 +65,7 @@ class InvoiceAgentService:
         mlflow_recorder = MlflowRunRecorder(
             run_id=run_id,
             run_dir=run_dir,
+            config_path=self.settings.config_path,
             config=self.settings.config,
             prompt=prompt,
         )

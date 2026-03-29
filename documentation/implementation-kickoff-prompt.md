@@ -20,15 +20,22 @@ Architectural decisions that are already locked:
 - Keep mock mode as the default development and test path
 - Keep live mode optional via Gemini through ADK
 - Keep one architecture across mock and live mode
-- Do not introduce AG-UI or MLflow unless you discover a concrete blocker and explain why
+- Keep the existing MLflow-backed tracing and verification path unless you discover a concrete blocker and explain why
 
 Use the repo-local subagents intentionally:
-- `agent_sdk_expert` for Google ADK behavior, planner-loop integrity, and SSE mapping risks
-- `assignment_guardian` for strict compliance checks against the assignment and ADR
-- `trace_fixture_auditor` for fixture coverage, golden transcripts, SSE traces, and observability quality
-- `backend_builder` for bounded FastAPI/ADK/SSE/tool-registry implementation tasks
+- `assignment_guardian` for strict requirement-by-requirement compliance checks, missing evidence review, and helper-agent prompt upgrades
+- `agent_sdk_expert` for Google ADK behavior, planner-loop integrity, SSE mapping risks, and agent-pattern review
+- `trace_fixture_auditor` for fixture coverage, golden transcripts, SSE traces, MLflow observability quality, and reviewer-trust gaps
+- `backend_builder` for bounded implementation tasks after the review agents produce patch-ready recommendations
 
-Keep the main thread as the conductor. Use subagents for bounded specialized work, especially read-heavy review and verification. Prefer only one write-capable implementation agent at a time.
+Keep the main thread as the conductor. Use subagents for bounded specialized work, especially read-heavy review and verification. Prefer only one write-capable implementation agent at a time. Any ad hoc spawned implementation or verification agent for this repository must use `gpt-5.4` with extra high reasoning effort unless the user explicitly changes that policy.
+
+Default reflection workflow for helper-agent and workflow-guidance changes:
+1. Run `assignment_guardian` first for compliance framing
+2. Run `agent_sdk_expert` for ADK, planner-loop, and orchestrator review
+3. Run `trace_fixture_auditor` for evidence, traces, fixtures, and MLflow review
+4. Hand the resulting patch-ready actions to `backend_builder`
+5. Re-run `assignment_guardian` and `trace_fixture_auditor` for final review
 
 Implementation goals:
 - Build `POST /runs/stream`
@@ -80,4 +87,4 @@ Begin by reading the source-of-truth files, summarizing the implementation check
 
 This prompt is designed to work with the repo-local subagent setup under `.codex/agents/` and the stack decision recorded in `documentation/adr/ADR-001-adopt-google-adk-mock-first-custom-sse-contract.md`.
 
-It is intentionally specific about the locked decisions so a future implementation session does not re-open the stack choice, mock-first strategy, or the custom SSE contract unless a real blocker is discovered.
+It is intentionally specific about the locked decisions so a future implementation session does not re-open the stack choice, mock-first strategy, MLflow-backed verification path, or the custom SSE contract unless a real blocker is discovered.
