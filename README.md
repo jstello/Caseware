@@ -2,6 +2,8 @@
 
 This repository contains a local invoice-processing agent built for the Caseware take-home assignment. The implementation uses Python, FastAPI, Google ADK, a server-owned SSE adapter, a deterministic mock-first tool pipeline, YAML-backed runtime configuration, and MLflow-backed run observability.
 
+![ADK Graph and Trace](image.png)
+
 ## What It Does
 
 - Exposes `POST /runs/stream`
@@ -121,6 +123,10 @@ In live mode:
 - Final categories are still clamped in code to the assignment taxonomy so unsupported model labels gracefully fall back to `Other`
 
 ## MLflow Tracing
+
+
+
+![MLflow Tracing](mlflow%20trace.png)
 
 MLflow tracing is enabled by default and writes to a local SQLite-backed store under [`artifacts/mlflow`](/Users/juan_tello/Documents/Caseware/Caseware/artifacts/mlflow).
 
