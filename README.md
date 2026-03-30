@@ -53,6 +53,17 @@ uv run uvicorn invoice_agent.app:app --reload
 
 The API starts on [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
+If you also want ADK Web open at the same time, do not run both servers on their default port. `uvicorn` and `adk web` both default to `127.0.0.1:8000`, so the second process will either fail to start or replace the server you think you are calling.
+
+One working split-port setup is:
+
+```bash
+uv run uvicorn invoice_agent.app:app --reload --port 8001
+uv run adk web --port 8000
+```
+
+In that setup, `curl` and other `/runs/stream` requests must go to [http://127.0.0.1:8001](http://127.0.0.1:8001), not the ADK Web UI on port `8000`.
+
 ## Test In ADK Web
 
 You can also exercise the ADK-native agent directly in the Web UI:
@@ -63,6 +74,7 @@ uv run adk web
 
 Open [http://127.0.0.1:8000](http://127.0.0.1:8000), choose `invoice_agent`, and start a session.
 
+- `adk web` also defaults to port `8000`, so if the FastAPI backend is already using that port, start one of them on another port, for example `uv run adk web --port 8000` plus `uv run uvicorn invoice_agent.app:app --reload --port 8001`.
 - The checked-in config currently defaults to the live planner, so the UI will call Gemini unless you override it.
 - If your message includes an absolute local folder path, `load_images` will use that folder.
 - If you upload invoice images directly in the ADK Web chat, the app now materializes those uploads into a run-local folder and `load_images` will use them instead of silently falling back to bundled fixtures.
@@ -155,6 +167,8 @@ uv run mlflow ui --backend-store-uri sqlite:////Users/juan_tello/Documents/Casew
 
 ## cURL Example: Folder Input
 
+If you are running ADK Web and the backend side by side, replace port `8000` below with the backend port, for example `8001`.
+
 ```bash
 curl -N \
   -H "Content-Type: application/json" \
@@ -166,6 +180,8 @@ curl -N \
 ```
 
 ## cURL Example: Multipart Input
+
+If you are running ADK Web and the backend side by side, replace port `8000` below with the backend port, for example `8001`.
 
 ```bash
 curl -N \
