@@ -1,6 +1,6 @@
 # Invoice Agent
 
-This repository contains a local invoice-processing agent built for the Caseware take-home assignment. The implementation uses Python, FastAPI, Google ADK, a server-owned SSE adapter, a deterministic mock-first tool pipeline, YAML-backed runtime configuration, and MLflow-backed run observability.
+This repository contains a local invoice-processing agent built for the Caseware take-home assignment. The implementation uses Python, FastAPI, Google ADK, a server-owned SSE adapter, YAML-backed runtime configuration, and MLflow-backed run observability.
 
 ![ADK Graph and Trace](image.png)
 
